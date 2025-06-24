@@ -1,0 +1,49 @@
+Unified Source-Available License and Contributor Agreement
+© 2025 Chance Brownfield
+
+Last updated: June 24, 2025
+
+------------------------------------------------------------
+1. DEFINITIONS
+   1. “Licensed Work” means any code, model architecture specifications, documentation, and pretrained model weights published by the Licensor.
+   2. “Pretrained Model” means any model weights publicly released by the Licensor, trained on the Licensed Work.
+   3. “Contribution” means any submission (code, documentation, pretrained models, or other materials) made by a third party to this project.
+   4. “Derivative Work” has the meaning given under applicable copyright law.
+
+------------------------------------------------------------
+2. PRETRAINED MODELS: CC BY-NC-ND TERMS
+   1. All Pretrained Models are licensed under Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International.
+   2. You may copy and redistribute the Pretrained Models **only** for non-commercial purposes, provided you give appropriate attribution:
+      “Pretrained model by Chance Brownfield, licensed CC BY-NC-ND 4.0.”
+   3. You may **not** create derivative works of the Pretrained Models or use them commercially without express written permission from Chance Brownfield.
+
+------------------------------------------------------------
+3. CODE & ARCHITECTURE: BUSINESS SOURCE LICENSE 1.1
+   1. You may copy, modify, create Derivative Works of, and use the Licensed Work **only** for non-production and non-commercial purposes, without further permission.
+   2. All production or commercial use—including internal deployment, offering services to third parties, retraining, inference for payment, or embedding in products—**requires explicit written permission** and/or a commercial license from Chance Brownfield.
+   3. You may **not** train, refine, or develop any new model using this architecture without the express authorization of Chance Brownfield.
+   4. **Change Date:** On June 24, 2029, this section (3) automatically converts to the terms of the GNU General Public License version 2.0 or later, and the restrictions in 3.1–3.3 no longer apply.
+   5. Rights granted under this section terminate automatically upon any breach of these terms. Continued use after termination requires a commercial license or cessation of use.
+
+------------------------------------------------------------
+4. CONTRIBUTOR LICENSE AGREEMENT (CLA)
+   By submitting a Contribution to this project, you agree that:
+   1. You own or have the rights to your Contribution.
+   2. You grant the Licensor a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to reproduce, prepare Derivative Works of, distribute, and publicly display or perform your Contribution, and to sublicense these rights under any terms (including proprietary or commercial licenses).
+   3. You grant the Licensor a patent license to use any patents you hold that would necessarily be infringed by your Contribution.
+   4. You waive all moral rights and any claims against the Licensor arising from use of your Contribution.
+   5. You acknowledge and support the Licensor’s enforcement of Sections 2 and 3: all commercial use, retraining, deployment, or derivative architecture development requires explicit permission from Chance Brownfield.
+
+------------------------------------------------------------
+5. WARRANTY & LIABILITY
+   The Licensed Work and any Contributions are provided “AS IS”, without warranty of any kind. The Licensor and contributors are not liable for any claims or damages arising from use.
+
+------------------------------------------------------------
+6. GOVERNING LAW
+   This entire Agreement is governed by the laws of the USA, without regard to conflict-of-law principles.
+
+------------------------------------------------------------
+7. CONTACT & COMMERCIAL LICENSING
+   For any commercial licensing inquiries, or to request permission for training or derivative work, please contact:
+   Chance Brownfield
+   ChanceBrownfield3515@gmail.com
