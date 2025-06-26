@@ -38,6 +38,7 @@
 10. [Component Summary Table](#component-summary-table)
 11. [Conclusion and Future Work](#conclusion-and-future-work)
 12. [References](#references)
+13. [Acknowledgments](#acknowledgments)
 
 # Abstract
 
@@ -401,3 +402,14 @@ Last updated: June 24, 2025
    For any commercial licensing inquiries, or to request permission for training or derivative work, please contact:
    Chance Brownfield
    [ChanceBrownfield3515@gmail.com](mailto:ChanceBrownfield3515@gmail.com)
+
+# Acknowledgments
+
+We gratefully acknowledge the Cerebrum Development Team for their invaluable contributions to the design, implementation, and testing of the Cerebrum Architecture.
+
+| Name                    | Title                                           | Contact Information                            | 
+| ----------------------- | ----------------------------------------------- | ---------------------------------------------- |
+| Chance Brownfield       | Author\Project Lead                             | ChanceBrownfield3515@gmail.com                 |
+| Tigran S                | Co-Author\Architecual Specialist                | https://www.freelancer.com/u/Tigran245         |
+| Allen P                 | Trainer\Data Specialist                         | https://www.freelancer.com/u/allenjames0828    |
+| ----------------------- | ----------------------------------------------- | ---------------------------------------------- |
