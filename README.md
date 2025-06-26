@@ -51,12 +51,6 @@ Hybrid generative modeling has grown increasingly complex, combining components 
 * **Hierarchical Management**: from single‐model MM to multi‐model MMMan to top‐level Cerebrum.
 * **Composable Hybrids**: MultiMixtureTransformer that stitches VAEs, RNN‐HMM, GMM, diffusion blocks, and Transformers into one end‐to‐end trainable network.
 
-This paper elaborates each module, data paths, training loops, and example workflows.
-
-# Background and Related Work
-
-Discuss VAE+GMM priors (e.g. GM‐VAE), diffusion models, Transformers for time series, and probabilistic model management tools. Compare to existing libraries (e.g. `sklearn.mixture`, `hmmlearn`, `Pyro/NumPyro`). Highlight novel integration of rule‐based auxiliary losses and “CoRe²” drafting.
-
 # System Architecture
 
 ## Overview
