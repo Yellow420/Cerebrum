@@ -192,7 +192,7 @@ Standard PyTorch Transformer with learned input/output projections, enabling fle
 
 # Data Flow and Computational Graph
 
-Illustrate a detailed diagram: (1) input → encoder → latent zs; (2) zs → decoder → recon; (3) zs → RNN → emissions; (4) emissions + transitions → HMM NLL; (5) zs + tgt → Transformer → autoregressive outputs.
+![Diagram](images/architecture.png)
 
 # Training Procedures
 
