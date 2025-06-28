@@ -1,4 +1,6 @@
 # By: Chance Brownfield
+# Cerebrum
+# "0.1.0"
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +10,177 @@ import tempfile
 import random
 import string
 import math
-import numpy as np
+
+# Try to import numpy, but don't fail if it's not available
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+    print("Warning: NumPy not available. Using PyTorch tensors instead.")
+    # Create a mock numpy module using torch
+    class MockNumpy:
+        def __init__(self):
+            self.random = MockRandom()
+        
+        def array(self, data, **kwargs):
+            if isinstance(data, torch.Tensor):
+                return data
+            return torch.tensor(data, **kwargs)
+        
+        def vstack(self, arrays):
+            if isinstance(arrays[0], torch.Tensor):
+                return torch.cat(arrays, dim=0)
+            return torch.tensor(arrays)
+        
+        def random(self):
+            return self.random
+    
+    class MockRandom:
+        def __init__(self):
+            self.seed = lambda x: torch.manual_seed(x)
+            self.randn = lambda *args: torch.randn(*args)
+    
+    np = MockNumpy()
+
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, Union
+
+
+# --- Configuration System ---
+
+@dataclass
+class CerebrumConfig:
+    """Configuration class for different Cerebrum types."""
+    
+    # Model type
+    model_type: str = "mmm"  # "gmm", "hmm", "mmm"
+    
+    # Architecture parameters
+    input_dim: int = 64
+    hidden_dim: int = 128
+    z_dim: int = 32
+    rnn_hidden: int = 64
+    num_states: int = 8
+    n_mix: int = 4
+    trans_d_model: int = 128
+    trans_nhead: int = 8
+    trans_layers: int = 4
+    output_dim: int = 64
+    
+    # Training parameters
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
+    kl_anneal_epochs: int = 50
+    clip_norm: float = 5.0
+    label_smoothing: float = 0.1
+    entropy_coef: float = 0.01
+    
+    # Task-specific parameters
+    vocab_size: Optional[int] = None
+    max_sequence_length: int = 512
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary."""
+        return {
+            'input_dim': self.input_dim,
+            'hidden_dim': self.hidden_dim,
+            'z_dim': self.z_dim,
+            'rnn_hidden': self.rnn_hidden,
+            'num_states': self.num_states,
+            'n_mix': self.n_mix,
+            'trans_d_model': self.trans_d_model,
+            'trans_nhead': self.trans_nhead,
+            'trans_layers': self.trans_layers,
+            'output_dim': self.output_dim
+        }
+
+
+# Predefined configurations for different Cerebrum types
+class CerebrumConfigs:
+    """Predefined configurations for different Cerebrum applications."""
+    
+    @staticmethod
+    def eeg_cerebrum() -> CerebrumConfig:
+        """Configuration for EEG seizure prediction/recognition."""
+        return CerebrumConfig(
+            model_type="mmm",
+            input_dim=64,  # EEG channels
+            hidden_dim=256,
+            z_dim=128,
+            rnn_hidden=128,
+            num_states=16,  # More states for complex brain patterns
+            n_mix=8,
+            trans_d_model=256,
+            trans_nhead=16,
+            trans_layers=6,
+            output_dim=64,
+            learning_rate=5e-5,
+            kl_anneal_epochs=100,
+            max_sequence_length=1024  # Longer sequences for EEG
+        )
+    
+    @staticmethod
+    def tts_cerebrum() -> CerebrumConfig:
+        """Configuration for Text-to-Speech voice cloning."""
+        return CerebrumConfig(
+            model_type="mmm",
+            input_dim=80,  # Mel spectrogram features
+            hidden_dim=512,
+            z_dim=256,
+            rnn_hidden=256,
+            num_states=32,  # Many states for voice characteristics
+            n_mix=16,
+            trans_d_model=512,
+            trans_nhead=16,
+            trans_layers=8,
+            output_dim=80,
+            learning_rate=1e-4,
+            kl_anneal_epochs=50,
+            max_sequence_length=2048  # Long audio sequences
+        )
+    
+    @staticmethod
+    def speaker_recognition_cerebrum() -> CerebrumConfig:
+        """Configuration for Speaker Recognition."""
+        return CerebrumConfig(
+            model_type="mmm",
+            input_dim=40,  # MFCC features
+            hidden_dim=256,
+            z_dim=128,
+            rnn_hidden=128,
+            num_states=24,  # States for different speakers
+            n_mix=12,
+            trans_d_model=256,
+            trans_nhead=8,
+            trans_layers=4,
+            output_dim=40,
+            learning_rate=1e-4,
+            kl_anneal_epochs=30,
+            max_sequence_length=800  # Medium audio sequences
+        )
+    
+    @staticmethod
+    def conversational_cerebrum() -> CerebrumConfig:
+        """Configuration for Conversational AI text generation."""
+        return CerebrumConfig(
+            model_type="mmm",
+            input_dim=512,  # Token embeddings
+            hidden_dim=1024,
+            z_dim=512,
+            rnn_hidden=512,
+            num_states=64,  # Many states for language patterns
+            n_mix=32,
+            trans_d_model=1024,
+            trans_nhead=16,
+            trans_layers=12,
+            output_dim=512,
+            vocab_size=50000,  # Large vocabulary
+            learning_rate=5e-5,
+            kl_anneal_epochs=100,
+            label_smoothing=0.1,
+            max_sequence_length=2048  # Long text sequences
+        )
 
 
 # --- Building Blocks ---
@@ -321,49 +493,150 @@ class MultiMixtureTransformer(nn.Module):
             loss = loss + rule['reward'] * diff
         return loss
 
-    def training_step(self, x, optimizer):
+    def get_kl_annealing_weight(self, epoch, total_epochs, anneal_type='linear'):
+        """
+        Compute KL annealing weight to prevent mode collapse.
+        
+        Args:
+            epoch: Current epoch
+            total_epochs: Total number of epochs
+            anneal_type: Type of annealing ('linear', 'cosine', 'step')
+        
+        Returns:
+            float: Annealing weight between 0 and 1
+        """
+        if total_epochs == 0:
+            return 1.0
+            
+        progress = epoch / total_epochs
+        
+        if anneal_type == 'linear':
+            return min(1.0, progress)
+        elif anneal_type == 'cosine':
+            return 0.5 * (1 + math.cos(math.pi * (1 - progress)))
+        elif anneal_type == 'step':
+            # Step annealing: 0 for first 20%, then 0.5 for 20-60%, then 1.0
+            if progress < 0.2:
+                return 0.0
+            elif progress < 0.6:
+                return 0.5
+            else:
+                return 1.0
+        else:
+            return min(1.0, progress)
+
+    def training_step(self, x, optimizer, epoch=0, total_epochs=100, anneal_type='linear'):
+        """
+        Enhanced training step with KL annealing and better loss computation.
+        """
         outputs = self.forward(x)
-        base = self.loss(x, outputs)
-        total = base + self.back_loss()
+        base_loss = self.loss(x, outputs)
+        
+        # Compute KL annealing weight
+        kl_weight = self.get_kl_annealing_weight(epoch, total_epochs, anneal_type)
+        
+        # Apply KL annealing to the loss
+        if hasattr(outputs, 'kld'):
+            total_loss = base_loss + kl_weight * outputs['kld']
+        else:
+            total_loss = base_loss
+            
+        # Add auxiliary rule losses
+        rule_loss = self.back_loss()
+        total_loss = total_loss + rule_loss
+        
         optimizer.zero_grad()
-        total.backward()
+        total_loss.backward()
         optimizer.step()
-        return total.detach()
+        
+        return {
+            'total_loss': total_loss.detach(),
+            'base_loss': base_loss.detach(),
+            'kl_weight': kl_weight,
+            'rule_loss': rule_loss.detach() if isinstance(rule_loss, torch.Tensor) else torch.tensor(rule_loss)
+        }
 
     def forward(self, x, tgt=None):
-        if x.dim() == 3:
-            T, B, _ = x.size()
-            zs, mus, logvars = [], [], []
-            for t in range(T):
-                mu_t, logvar_t = self.encoder(x[t])
-                z_t = self.reparameterize(mu_t, logvar_t)
-                zs.append(z_t)
-                mus.append(mu_t)
-                logvars.append(logvar_t)
-            zs = torch.stack(zs)
-            mus = torch.stack(mus)
-            logvars = torch.stack(logvars)
-        else:
-            mu, logvar = self.encoder(x)
-            zs = self.reparameterize(mu, logvar)
-            mus, logvars = mu, logvar
+        """
+        Forward pass with comprehensive error handling and logging.
+        """
+        try:
+            # Input validation
+            if x is None:
+                raise ValueError("Input tensor x cannot be None")
+            
+            if not isinstance(x, torch.Tensor):
+                raise TypeError(f"Input x must be a torch.Tensor, got {type(x)}")
+            
+            if x.dim() not in [2, 3]:
+                raise ValueError(f"Input x must be 2D or 3D tensor, got shape {x.shape}")
+            
+            # Store original shape for reconstruction
+            original_shape = x.shape
+            
+            if x.dim() == 3:
+                T, B, _ = x.size()
+                zs, mus, logvars = [], [], []
+                for t in range(T):
+                    try:
+                        mu_t, logvar_t = self.encoder(x[t])
+                        z_t = self.reparameterize(mu_t, logvar_t)
+                        zs.append(z_t)
+                        mus.append(mu_t)
+                        logvars.append(logvar_t)
+                    except Exception as e:
+                        raise RuntimeError(f"Encoding failed at timestep {t}: {e}")
+                zs = torch.stack(zs)
+                mus = torch.stack(mus)
+                logvars = torch.stack(logvars)
+            else:
+                try:
+                    mu, logvar = self.encoder(x)
+                    zs = self.reparameterize(mu, logvar)
+                    mus, logvars = mu, logvar
+                except Exception as e:
+                    raise RuntimeError(f"Single-step encoding failed: {e}")
 
-        recon = self.decoder(zs.view(-1, zs.size(-1))).view_as(x)
-        emissions, transitions = self.rn(zs.permute(1, 0, 2))
-        flat_z = zs.view(-1, zs.size(-1))
-        seq_ll = self.hm.log_prob(flat_z)
-        hgmm_ll = seq_ll.view(1, 1, 1).expand_as(emissions)
-        trans_out = self.transformer(zs, tgt) if tgt is not None else None
+            # Reconstruction
+            try:
+                recon = self.decoder(zs.view(-1, zs.size(-1))).view_as(x)
+            except Exception as e:
+                raise RuntimeError(f"Reconstruction failed: {e}")
+            
+            # RNN and HMM processing
+            try:
+                emissions, transitions = self.rn(zs.permute(1, 0, 2))
+                flat_z = zs.view(-1, zs.size(-1))
+                seq_ll = self.hm.log_prob(flat_z)
+                hgmm_ll = seq_ll.view(1, 1, 1).expand_as(emissions)
+            except Exception as e:
+                raise RuntimeError(f"RNN/HMM processing failed: {e}")
+            
+            # Optional transformer pass
+            trans_out = None
+            if tgt is not None:
+                try:
+                    trans_out = self.transformer(zs, tgt)
+                except Exception as e:
+                    raise RuntimeError(f"Transformer forward pass failed: {e}")
 
-        return {
-            'reconstruction': recon,
-            'mu': mus,
-            'logvar': logvars,
-            'emissions': emissions,
-            'transitions': transitions,
-            'hgmm_log_likelihood': hgmm_ll,
-            'transformer_out': trans_out
-        }
+            return {
+                'reconstruction': recon,
+                'mu': mus,
+                'logvar': logvars,
+                'emissions': emissions,
+                'transitions': transitions,
+                'hgmm_log_likelihood': hgmm_ll,
+                'transformer_out': trans_out,
+                'original_shape': original_shape
+            }
+            
+        except Exception as e:
+            # Log the error with context
+            error_msg = f"Forward pass failed: {str(e)}"
+            if hasattr(self, 'logger'):
+                self.logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
 
     def loss(self, x, outputs):
         recon, mu, logvar = outputs['reconstruction'], outputs['mu'], outputs['logvar']
@@ -536,7 +809,8 @@ class MultiMixtureTransformer(nn.Module):
                         target_tokens,  # (B, T)
                         max_len=None,
                         K=4,
-                        entropy_coef=0.01):
+                        entropy_coef=0.01,
+                        label_smoothing=0.1):
         if self.auto_decoder is None:
             raise RuntimeError('Autoregressive components not initialized')
         L, B, Z = context_sequence.size()
@@ -568,12 +842,13 @@ class MultiMixtureTransformer(nn.Module):
         mask = nn.Transformer.generate_square_subsequent_mask(dec_in.size(0)).to(z_plan.device)
         out = self.auto_decoder(dec_in, dec_in, tgt_mask=mask)  # (T-1,B,Z)
 
-        # — 5) Final logits and CE
+        # — 5) Final logits and CE with label smoothing
         logits = self.to_vocab(out).permute(1, 0, 2)  # (B, T-1, V)
         ce_loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
             lbl.reshape(-1),
-            reduction='mean'
+            reduction='mean',
+            label_smoothing=label_smoothing
         )
 
         # — 6) Entropy regularization—discourage collapse
@@ -907,73 +1182,143 @@ class Cerebrum(nn.Module):
 
     def fit_and_add(self,
                     data,
+                    config: Optional[CerebrumConfig] = None,
                     model_type: str = 'gmm',
                     model_id: str = None,
                     kl_anneal_epochs: int = 0,
                     clip_norm: float = 5.0,
                     weight_decay: float = 1e-5,
                     **kwargs):
+        """
+        Fit and add a model using configuration or legacy parameters.
+        
+        Args:
+            data: Training data
+            config: CerebrumConfig object (preferred)
+            model_type: Legacy parameter for model type
+            model_id: Optional model identifier
+            kl_anneal_epochs: Legacy KL annealing parameter
+            clip_norm: Gradient clipping norm
+            weight_decay: Weight decay for optimizer
+            **kwargs: Additional parameters
+        """
+        # Use config if provided, otherwise use legacy parameters
+        if config is not None:
+            model_type = config.model_type
+            kl_anneal_epochs = config.kl_anneal_epochs
+            weight_decay = config.weight_decay
+            clip_norm = config.clip_norm
+            # Update kwargs with config parameters
+            config_dict = config.to_dict()
+            kwargs.update(config_dict)
+        
         model_type = model_type.lower()
+        
         if model_type in ('gmm', 'hmm'):
             mm = MMMan()
             mm.fit(data, model_type=model_type, **kwargs)
             model = mm
 
         elif model_type == 'mmm':
-            # build hybrid model
+            # build hybrid model using config or kwargs
+            required_params = ['input_dim', 'hidden_dim', 'z_dim', 'rnn_hidden', 
+                             'num_states', 'n_mix', 'trans_d_model', 'trans_nhead', 
+                             'trans_layers', 'output_dim']
+            
+            # Check if all required parameters are available
+            missing_params = [param for param in required_params if param not in kwargs]
+            if missing_params:
+                raise ValueError(f"Missing required parameters for MMM: {missing_params}")
+            
+            # Extract parameters
+            input_dim = kwargs.pop('input_dim')
+            hidden_dim = kwargs.pop('hidden_dim')
+            z_dim = kwargs.pop('z_dim')
+            rnn_hidden = kwargs.pop('rnn_hidden')
+            num_states = kwargs.pop('num_states')
+            n_mix = kwargs.pop('n_mix')
+            trans_d_model = kwargs.pop('trans_d_model')
+            trans_nhead = kwargs.pop('trans_nhead')
+            trans_layers = kwargs.pop('trans_layers')
+            output_dim = kwargs.pop('output_dim')
+            
+            # Optional parameters
+            vocab_size = kwargs.pop('vocab_size', None)
+            token_embedding = kwargs.pop('token_embedding', None)
+            
             model = MultiMixtureTransformer(
-                kwargs.pop('input_dim'),
-                kwargs.pop('hidden_dim'),
-                kwargs.pop('z_dim'),
-                kwargs.pop('rnn_hidden'),
-                kwargs.pop('num_states'),
-                kwargs.pop('n_mix'),
-                kwargs.pop('trans_d_model'),
-                kwargs.pop('trans_nhead'),
-                kwargs.pop('trans_layers'),
-                kwargs.pop('output_dim')
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                z_dim=z_dim,
+                rnn_hidden=rnn_hidden,
+                num_states=num_states,
+                n_mix=n_mix,
+                trans_d_model=trans_d_model,
+                trans_nhead=trans_nhead,
+                trans_layers=trans_layers,
+                output_dim=output_dim,
+                token_embedding=token_embedding,
+                vocab_size=vocab_size
             )
-            optim = torch.optim.Adam(model.parameters(), lr=kwargs.get('lr', 1e-4), weight_decay=weight_decay)
+            
+            # Use config learning rate if available
+            lr = config.learning_rate if config else kwargs.get('lr', 1e-4)
             epochs = kwargs.get('epochs', 100)
+            
+            optim = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
             x = data.float().to(next(model.parameters()).device)
 
             for epoch in range(epochs):
                 model.train()
-                optim.zero_grad()
-                out = model(x, kwargs.get('tgt', None))
+                
+                # Use enhanced training step with KL annealing
+                if config:
+                    step_result = model.training_step(
+                        x, optim, epoch, epochs, 
+                        anneal_type='linear'
+                    )
+                    total_loss = step_result['total_loss']
+                    
+                    # Log training progress
+                    if epoch % max(1, epochs // 10) == 0:
+                        print(f"Epoch {epoch}: loss={total_loss.item():.4f}, "
+                              f"kl_weight={step_result['kl_weight']:.3f}")
+                else:
+                    # Legacy training
+                    optim.zero_grad()
+                    out = model(x, kwargs.get('tgt', None))
 
-                # Reconstruction loss: MSE
-                recon = out['reconstruction']
-                recon_loss = F.mse_loss(recon, x, reduction='sum')
+                    # Reconstruction loss: MSE
+                    recon = out['reconstruction']
+                    recon_loss = F.mse_loss(recon, x, reduction='sum')
 
-                # Clamp encoder logvars for KLD
-                mu, logvar = out['mu'], out['logvar']
-                logvar_clamped = torch.clamp(logvar, min=-10.0, max=10.0)
-                kld = -0.5 * torch.sum(1 + logvar_clamped - mu.pow(2) - logvar_clamped.exp())
+                    # Clamp encoder logvars for KLD
+                    mu, logvar = out['mu'], out['logvar']
+                    logvar_clamped = torch.clamp(logvar, min=-10.0, max=10.0)
+                    kld = -0.5 * torch.sum(1 + logvar_clamped - mu.pow(2) - logvar_clamped.exp())
 
-                # HMM NLL with clamped likelihoods
-                hgmm_ll = out['hgmm_log_likelihood']
-                # avoid extreme values
-                hgmm_ll = torch.clamp(hgmm_ll, min=-1e6, max=1e6)
-                hgmm_nll = -torch.sum(hgmm_ll)
+                    # HMM NLL with clamped likelihoods
+                    hgmm_ll = out['hgmm_log_likelihood']
+                    hgmm_ll = torch.clamp(hgmm_ll, min=-1e6, max=1e6)
+                    hgmm_nll = -torch.sum(hgmm_ll)
 
-                # numeric safe
-                kld = torch.nan_to_num(kld, nan=0.0, posinf=1e8, neginf=-1e8)
-                hgmm_nll = torch.nan_to_num(hgmm_nll, nan=0.0, posinf=1e8, neginf=-1e8)
+                    # numeric safe
+                    kld = torch.nan_to_num(kld, nan=0.0, posinf=1e8, neginf=-1e8)
+                    hgmm_nll = torch.nan_to_num(hgmm_nll, nan=0.0, posinf=1e8, neginf=-1e8)
 
-                # Annealing weight
-                anneal_w = min(1.0, epoch / kl_anneal_epochs) if kl_anneal_epochs > 0 else 1.0
-                loss = recon_loss + anneal_w * (kld + hgmm_nll)
+                    # Annealing weight
+                    anneal_w = min(1.0, epoch / kl_anneal_epochs) if kl_anneal_epochs > 0 else 1.0
+                    total_loss = recon_loss + anneal_w * (kld + hgmm_nll)
 
-                # Backprop & gradient clipping
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
-                optim.step()
+                    # Backprop & gradient clipping
+                    total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                    optim.step()
 
-                # Optional logging
-                if epoch % max(1, epochs // 5) == 0:
-                    print(f"Epoch {epoch}: recon={recon_loss.item():.1f}, kld={kld.item():.1f}, "
-                          f"hmll={hgmm_nll.item():.1f}, anneal_w={anneal_w:.2f}")
+                    # Optional logging
+                    if epoch % max(1, epochs // 5) == 0:
+                        print(f"Epoch {epoch}: recon={recon_loss.item():.1f}, kld={kld.item():.1f}, "
+                              f"hmll={hgmm_nll.item():.1f}, anneal_w={anneal_w:.2f}")
         else:
             raise ValueError("model_type must be 'gmm','hmm', or 'mmm'")
 

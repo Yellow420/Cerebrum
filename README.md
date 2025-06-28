@@ -1,5 +1,7 @@
 # Cerebrum: A Multi-Mixture Model
 
+![Version](https://img.shields.io/badge/version-0.1.0-red)
+
 # Table of Contents
 
 
@@ -34,7 +36,7 @@
    1. [Scoring and Sampling](#scoring-and-sampling)
    2. [Regression and Autoregressive Generation](#regression-and-autoregressive-generation)
 8. [Performance Considerations](#performance-considerations)
-9. [Example Usage Patterns](#example-usage-patterns)
+9. [Use Examples](#use-examples)
 10. [Component Summary Table](#component-summary-table)
 11. [Conclusion and Future Work](#conclusion-and-future-work)
 12. [References](#references)
@@ -226,17 +228,13 @@ Users can `add_rule(name,label,target,reward)` to enforce scalar‐mean constrai
 
 Detailed pseudo‐code for `regression()` including block splitting, denoiser instantiation per block, top‑p sampling, cross‑attention loops, and final refinement.
 
-# Performance Considerations
-
-* Memory: storing multiple submodels vs. single large hybrid.
-* Computation: per‐step encoding and HMM forward algorithm is $O(TS^2)$. Transformer adds $O(T^2 d)$.
-* Mixed precision: Transformer cross‑attention under `torch.amp.autocast` on GPU.
-
-# Example Usage Patterns
+# Use Examples
 
 Below are comprehensive examples covering all major workflows.
 
-## 1. Basic GMM/HMM Operations
+---
+
+### 1. Basic GMM/HMM Operations
 
 ```python
 from cerebrum import Cerebrum, MMMan
@@ -259,66 +257,55 @@ lls = brain.get_log_likelihoods(hmm_id, seq_data)
 brain.models['my_gmm'].unfit('my_gmm')  # for MMMan-based managers
 ```
 
-## 2. Managing Multiple Submodels with MMMan
+### 2. Managing Multiple Submodels with MMMan
 
 ```python
-# Directly use MMMan
+from cerebrum import MMMan, GaussianMixture
+
 mmman = MMMan()
 # Absorb pre-trained GMM instance
-from cerebrum import GaussianMixture
 pre_gmm = GaussianMixture(5, 10)
 mmman.fit(data=pre_gmm, model_type='gmm', data_id=0)
 # Fit HMM and GMM together
 mmman.fit(data=lh_seq, model_type='hmm', n_components=2, n_mix=3, data_id='hmm_seq')
 
 # Bulk queries
-all_means = mmman.get_means()  # dict of all stored
-single_means = mmman.get_means(0)  # numpy array
+all_means = mmman.get_means()         # dict of all stored models
+single_means = mmman.get_means(0)     # numpy array for model id 0
 scores = mmman.score(seq_data_batch)  # dict of scores per model
 ```
 
-## 3. Hybrid MMM: MultiMixtureTransformer
+### 3. Hybrid MMM: MultiMixtureTransformer
 
 ```python
 # Fit-and-add an end-to-end hybrid model
-mmm_id = brain.fit_and_add(
-    data=ts_data,
-    model_type='mmm',
-    input_dim=16,
-    hidden_dim=64,
-    z_dim=32,
-    rnn_hidden=128,
-    num_states=4,
-    n_mix=2,
-    trans_d_model=32,
-    trans_nhead=4,
-    trans_layers=3,
+detail_params = dict(
+    input_dim=16, hidden_dim=64, z_dim=32, rnn_hidden=128,
+    num_states=4, n_mix=2,
+    trans_d_model=32, trans_nhead=4, trans_layers=3,
     output_dim=16,
-    epochs=200,
-    kl_anneal_epochs=50,
-    clip_norm=2.0,
-    weight_decay=1e-4
+    epochs=200, kl_anneal_epochs=50,
+    clip_norm=2.0, weight_decay=1e-4
 )
-# One-step prediction
-x_next = brain.models[mmm_id].predict(x_current)
-# Recognition toward a target latent z
-z_target = torch.randn_like(x_current)  # example
+mmm_id = brain.fit_and_add(data=ts_data, model_type='mmm', **detail_params)
+
+# Prediction, recognition, generation
+x_next       = brain.models[mmm_id].predict(x_current)
+z_target     = torch.randn_like(x_current)
 reconstructed = brain.models[mmm_id].recognize(x_current, tgt_z=z_target)
-# Full sequence generation
-gen_seq = brain.models[mmm_id].generate(num_steps=10, batch_size=2)
+gen_seq      = brain.models[mmm_id].generate(num_steps=10, batch_size=2)
 
 # Regression / CoRe² drafting
 logits, entropy_penalty = brain.models[mmm_id].regression(context_sequence)
 loss = brain.models[mmm_id].regression_loss(context_sequence, target_tokens)
 ```
 
-## 4. Auxiliary Features & Meta-Operations
+### 4. Auxiliary Features & Meta-Operations
 
 ```python
 # Rule-based auxiliary loss
 model = brain.models[mmm_id]
 model.add_rule(name='pred_balance', label='pred', reward_target=0.5, reward=10.0)
-# During training_step, back_loss incorporates these rules
 optimizer = torch.optim.Adam(model.parameters())
 loss = model.training_step(x_batch, optimizer)
 
@@ -327,15 +314,106 @@ state = brain.export_model(mmm_id)
 brain.import_model(mmm_id, state)
 
 # Check stored IDs
-ids_map = brain.models['MMMan'].check_data()  # or brain.check_data()
+ids_map = brain.models['MMMan'].check_data()
 
-# Assimilate another Cerebrum
+# Assimilate and full save/load
 brain.assimilate('other_brain.pt')
-
-# Complete save/load
 brain.save('cerebrum_full.pt')
 new_brain = Cerebrum.load('cerebrum_full.pt')
 ```
+
+---
+
+## B. Config-Based Usage (`CerebrumConfig`)
+
+The new `CerebrumConfig` system offers predefined presets plus full customizability. Both legacy and config-based calls coexist seamlessly.
+
+### Quick Start
+
+```python
+from modeling_cerebrum import Cerebrum, CerebrumConfigs
+import torch
+
+cerebrum = Cerebrum()
+# Train an EEG-Cerebrum in three lines:
+config   = CerebrumConfigs.eeg_cerebrum()
+data     = torch.randn(100, 32, config.input_dim)
+model_id = cerebrum.fit_and_add(data=data, config=config, epochs=100)
+```
+
+### 1. EEG-Cerebrum (Seizure Prediction)
+
+```python
+eeg_config = CerebrumConfigs.eeg_cerebrum()
+eeg_data   = torch.randn(time_steps, batch_size, eeg_config.input_dim)
+model_id   = cerebrum.fit_and_add(data=eeg_data, config=eeg_config, epochs=150, learning_rate=1e-4)
+```
+
+### 2. TTS-Cerebrum (Voice Cloning)
+
+```python
+tts_config = CerebrumConfigs.tts_cerebrum()
+tts_data   = torch.randn(seq_length, batch_size, tts_config.input_dim)
+model_id   = cerebrum.fit_and_add(data=tts_data, config=tts_config, epochs=200, kl_anneal_epochs=50)
+```
+
+### 3. SpeakerRecognition-Cerebrum (Speaker Identification)
+
+```python
+spk_config    = CerebrumConfigs.speaker_recognition_cerebrum()
+speaker_data  = torch.randn(seq_length, batch_size, spk_config.input_dim)
+model_id      = cerebrum.fit_and_add(data=speaker_data, config=spk_config, epochs=120)
+```
+
+### 4. Conversational-Cerebrum (Text Generation)
+
+```python
+conv_config = CerebrumConfigs.conversational_cerebrum()
+conv_data   = torch.randn(seq_length, batch_size, conv_config.input_dim)
+model_id    = cerebrum.fit_and_add(data=conv_data, config=conv_config, epochs=150, label_smoothing=0.1)
+```
+
+### 5. Custom Configuration
+
+```python
+from modeling_cerebrum import CerebrumConfig
+
+custom_config = CerebrumConfig(
+    input_dim=128, hidden_dim=512, z_dim=256,
+    num_states=16, n_mix=3,
+    kl_anneal_epochs=75, learning_rate=5e-5
+)
+model_id = cerebrum.fit_and_add(data=your_data, config=custom_config, epochs=200)
+```
+
+### Model Management (Works for Both)
+
+```python
+print("Models:", list(cerebrum.models.keys()))
+# Export/import individual models or full state
+e brain.export_model(model_id, "model.pt")
+brain.import_model(model_id, "model.pt")
+brain.save("cerebrum_brain.pt")
+loaded = Cerebrum.load("cerebrum_brain.pt")
+```
+
+---
+
+## Key Features
+
+* KL Annealing
+* Label Smoothing
+* Robust Error Handling
+* Unified Configuration System
+* Backward Compatibility
+* Comprehensive Model Management
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
+
 
 # Component Summary Table
 
@@ -408,8 +486,8 @@ Last updated: June 24, 2025
 We gratefully acknowledge the Cerebrum Development Team for their invaluable contributions to the design, implementation, and testing of the Cerebrum Architecture.
 
 | Name                    | Title                                           | Contact Information                            | 
-| ----------------------- | ----------------------------------------------- | ---------------------------------------------- |
+|-------------------------| ----------------------------------------------- |------------------------------------------------|
 | Chance Brownfield       | Author\Project Lead                             | ChanceBrownfield3515@gmail.com                 |
-| Tigran S                | Co-Author\Architecual Specialist                | https://www.freelancer.com/u/Tigran245         |
+| JOUN H                  | Co-Author\Architecual Specialist                | joun3910@gmail.com                             |
 | Allen P                 | Trainer\Data Specialist                         | https://www.freelancer.com/u/allenjames0828    |
 | ----------------------- | ----------------------------------------------- | ---------------------------------------------- |
