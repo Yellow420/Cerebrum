@@ -1,232 +1,180 @@
 # Cerebrum: A Multi-Mixture Model
 
-![Version](https://img.shields.io/badge/version-0.1.0-red)
+![Version](https://img.shields.io/badge/version-0.1.1-red)
 
-# Table of Contents
-
+## Table of Contents
 
 1. [Abstract](#abstract)
 2. [Introduction](#introduction)
-3. [Background and Related Work](#background-and-related-work)
-4. [System Architecture](#system-architecture)
+3. [System Architecture](#system-architecture)
 
-   1. [Overview](#overview)
-   2. [Module Descriptions](#module-descriptions)
-
-      1. [MM: Single-Model Wrapper](#mm-single-model-wrapper)
-      2. [MMMan: Multi-Model Manager](#mmman-multi-model-manager)
-      3. [Cerebrum: Top-Level Container](#cerebrum-top-level-container)
-      4. [MultiMixtureTransformer: Hybrid Sequence Model](#multimixturetransformer-hybrid-sequence-model)
-      5. [Supporting Components](#supporting-components)
-
-         1. [Encoder and Decoder](#encoder-and-decoder)
-         2. [TinyDiffusionBlock](#tinydiffusionblock)
-         3. [DraftScorer](#draftscorer)
-         4. [RecurrentNetwork and HiddenMarkov](#recurrentnetwork-and-hiddenmarkov)
-         5. [GaussianMixture](#gaussianmixture)
-         6. [TimeSeriesTransformer](#timeseriestransformer)
-5. [Data Flow and Computational Graph](#data-flow-and-computational-graph)
-6. [Training Procedures](#training-procedures)
-
-   1. [GMM/HMM Maximum Likelihood](#gmmhmm-maximum-likelihood)
-   2. [Hybrid Model Training](#hybrid-model-training)
-   3. [Auxiliary Rule Losses](#auxiliary-rule-losses)
-7. [Inference and Generation](#inference-and-generation)
-
-   1. [Scoring and Sampling](#scoring-and-sampling)
-   2. [Regression and Autoregressive Generation](#regression-and-autoregressive-generation)
-8. [Performance Considerations](#performance-considerations)
-9. [Use Examples](#use-examples)
-10. [Component Summary Table](#component-summary-table)
-11. [Conclusion and Future Work](#conclusion-and-future-work)
-12. [References](#references)
+   1. [Configuration System](#1-configuration-system)
+   2. [Adapter Module](#2-adapter-module--make_adapter_model)
+   3. [Variational Blocks (VAE)](#3-variational-blocks-vae)
+   4. [Diffusion & Draft Scoring](#4-diffusion--draft-scoring)
+   5. [Recurrent & Statistical Models](#5-recurrent--statistical-models)
+   6. [Transformer for Time Series](#6-transformer-for-time-series)
+   7. [MultiMixtureTransformer: Hybrid Sequence Model](#7-multimixturetransformer-hybrid-sequence-model)
+   8. [Cerebrum Controller & MoE Dynamics](#8-cerebrum-controller--moe-dynamics)
+4. [Data Flow & Computational Graph](#data-flow--computational-graph)
+5. [Training Procedures](#training-procedures)
+6. [Inference & Generation](#inference--generation)
+8. [Use Examples](#use-examples)
+9. [Component Summary](#component-summary)
+10. [Installation](#installation)
+11. [Conclusion](#conclusion)
+12. [Licensing](#licensing)
 13. [Acknowledgments](#acknowledgments)
 
-# Abstract
+---
 
-We introduce **Cerebrum**, a modular framework unifying probabilistic mixture models (GMMs), state‐space models (HMMs), and deep generative architectures (VAEs, diffusion, and Transformers) into a cohesive platform. Cerebrum features three layers: (1) **MM**, a wrapper for single‐model fitting and evaluation; (2) **MMMan**, a manager of multiple GMM/HMM instances; and (3) **Cerebrum**, a top‐level `ModuleDict` for arbitrary submodels including the advanced **MultiMixtureTransformer** hybrid. We detail the design, data flow, training regimes, and inference mechanisms, and demonstrate utility on synthetic and real time‐series tasks.
+## Abstract
 
-# Introduction
+Cerebrum is a unified framework combining probabilistic mixtures (GMM, HMM) and deep generative architectures (VAE, diffusion, Transformer) into a cohesive platform. It offers:
 
-Hybrid generative modeling has grown increasingly complex, combining components like Variational Autoencoders (VAEs), Gaussian Mixture Models (GMMs), Hidden Markov Models (HMMs), diffusion denoisers, and sequence Transformers. Integrating these disparate modules, each with unique parameterizations, loss functions, and inference algorithms, demands a unifying infrastructure. Cerebrum fulfills this need by providing:
+* **MM**: single-model wrapper with `.fit()`, `.score()`, and serialization.
+* **MMMan**: manager of multiple mixture instances with bulk operations.
+* **MultiMixtureTransformer**: hybrid VAE + RNN‑HMM + diffusion + Transformer.
+* **Cerebrum Controller**: dynamic Mixture-of-Experts routing learned adapters and legacy models.
 
-* **Unified Interfaces**: consistent `.fit(...)`, `.score(...)`, and `.export_model(...)` across model types.
-* **Hierarchical Management**: from single‐model MM to multi‐model MMMan to top‐level Cerebrum.
-* **Composable Hybrids**: MultiMixtureTransformer that stitches VAEs, RNN‐HMM, GMM, diffusion blocks, and Transformers into one end‐to‐end trainable network.
+---
 
-# System Architecture
+## Introduction
 
-## Overview
+Building hybrid models across statistical and neural paradigms requires consistent interfaces, flexible management, and composable building blocks. Cerebrum addresses this by:
 
-Cerebrum layers:
+1. **Unified APIs** across model types.
+2. **Hierarchical containers**: from single MM to MMMan to top-level Cerebrum.
+3. **Composable modules** enabling rapid prototyping of complex pipelines.
 
-1. **MM**: single‐model wrapper around GaussianMixture or HiddenMarkov. Handles tensor prep, training, scoring, and serialization.
-2. **MMMan**: manages multiple MM instances, identified by integer (GMM) or string (HMM) IDs. Provides bulk operations over arbitrary subsets.
-3. **Cerebrum**: top‐level container in a `ModuleDict`, supports arbitrary `nn.Module` submodels, including MMMan or MultiMixtureTransformer. Offers uniform API for fit/add, export/import, query, and assimilation of entire brains.
+---
 
-## Module Descriptions
+## System Architecture
 
-### MM: Single-Model Wrapper
+This section details each module and its core functions:
 
-**Initialization**:
+### 1. Configuration System
 
-* Stores `model_type`, `n_features`, and either `self.gmm` or `self.hm`.
-* Maintains `self.gmms` list and `self.hgmm_models` dict for fitted submodels.
+* **`CerebrumConfig.to_dict()`** → `Dict[str, Any]`
 
-**Key Methods**:
+  ```python
+  {
+    'input_dim': self.input_dim,
+    'hidden_dim': self.hidden_dim,
+    'z_dim': self.z_dim,
+    'rnn_hidden': self.rnn_hidden,
+    'num_states': self.num_states,
+    'n_mix': self.n_mix,
+    'trans_d_model': self.trans_d_model,
+    'trans_nhead': self.trans_nhead,
+    'trans_layers': self.trans_layers,
+    'output_dim': self.output_dim
+  }
+  ```
+* **Factory methods** (`CerebrumConfigs.eeg_cerebrum()`, `tts_cerebrum()`, etc.) return presets for common tasks.
 
-* `_prepare_tensor(X)`: casts input arrays to `torch.float32` Tensors, moves to correct device.
-* `fit(...)`: gradient‐based MLE via Adam. For GMM: minimizes `-mean(log_prob)`. For HMM: minimizes `-log_prob(sequence)` per sequence, averaged.
-* `unfit(data_id)`: remove by index or key.
-* `check_data()`: returns mapping of stored IDs to type.
-* `score(X)`: returns average log likelihood.
-* `get_log_likelihoods(X)`: per-sample sequence or vector log-likelihoods.
-* `get_means()`, `get_variances()`, `get_weights()`: expose learned parameters as NumPy arrays.
-* `export_model(filepath)`, `import_model(source)`: state‐dict serialization.
+### 2. Adapter Module & `make_adapter_model`
 
-### MMMan: Multi-Model Manager
+* **`Adapter.forward(x: Tensor)`** → `Tensor`
 
-**Initialization**: empty lists/dicts.
+  1. `down_proj`: Linear(`d_model` → `adapter_dim`)
+  2. `ReLU`
+  3. `up_proj`: Linear(`adapter_dim` → `d_model`)
 
-**Unique ID Generation**: random 6‐letter strings for HMMs, integer indices for GMMs.
+* **`make_adapter_model(base_model, base_config, flat_params)`**:
 
-**fit(data, ...)**:
+  1. Deep-copy `base_model`.
+  2. Insert `Adapter` layers at specified `layer_positions`.
+  3. Unpack `flat_params` into each adapter’s weights & biases.
+  4. Return modified model.
 
-1. If `data` is instance of `GaussianMixture` or `HiddenMarkov`, absorb directly.
-2. Else, create `MM` wrapper, call its `fit`, then extract `model.gmm` or `model.hm`.
-3. Store under appropriate container.
+### 3. Variational Blocks (VAE)
 
-**Bulk Getters** (`get_means`, `get_variances`, `get_weights`, `score`, `get_log_likelihoods`):
+* **`Encoder.forward(x: Tensor)`** → `(mu, logvar)`
 
-* Accept `data_ids=None` (all), single ID, or list. Return dict or scalar accordingly.
+  1. `h = ReLU(fc1(x))`
+  2. `mu = fc_mu(h)`
+  3. `logvar = fc_logvar(h)`
 
-**export\_model(data\_id)**: retrieves the object, not state dict.
+* **`Decoder.forward(z: Tensor)`** → `recon` in \[0,1]
 
-**unfit(data\_id)**: remove stored model.
+  1. `h = ReLU(fc1(z))`
+  2. `out = Sigmoid(fc_out(h))`
 
-### Cerebrum: Top-Level Container
+### 4. Diffusion & Draft Scoring
 
-**Initialization**: empty `ModuleDict`.
+* **`TinyDiffusionBlock.denoise(x: Tensor)`** → `Tensor`
 
-**add\_model(model, model\_id)**: insert any `nn.Module` under a key, ensuring uniqueness.
+  1. MLP(`block_dim` → `2*block_dim`) + `ReLU` → back to `block_dim`
+  2. Residual: `x + 0.1 * net(x)`
 
-**fit\_and\_add(data, model\_type, ...)**:
+* **`DraftScorer.forward(draft_tokens, z_plan)`** → `score`
+  Cross-attend token drafts to `z_plan`, autoregressively decode, compute average log-likelihood.
 
-* For `gmm`/`hmm`, uses a transient `MMMan` to fit and then registers that manager under `model_id`.
-* For `mmm`, directly instantiates `MultiMixtureTransformer`, runs custom training loop combining:
+### 5. Recurrent & Statistical Models
 
-  * Reconstruction (`MSE`) + KL divergence for VAE + negative HMM log‐likelihood.
-  * Optional KL annealing schedule.
-  * Gradient clipping and logging.
+* **`RecurrentNetwork.forward(x: Tensor)`** → `(emissions, transitions)`
+  LSTM → log-softmax emission and transition matrices.
 
-**export\_model(model\_id)** / **import\_model(model\_id)**: wrap `.state_dict()` ops.
+* **`GaussianMixture`**: `get_weights()`, `get_means()`, `get_variances()`, `log_prob(X)`, `score(X)`.
 
-**\_select\_data(mm, fn, data\_ids, …)**: utility to dispatch bulk model queries on an MMMan‐style object.
+* **`HiddenMarkov`**: `get_initial_prob()`, `get_transition_matrix()`, `log_prob(X)`, batch `score(X)`.
 
-**get\_means**, **get\_variances**, **get\_weights**, **score**, **get\_log\_likelihoods**: top‐level front ends that locate the appropriate manager and call `_select_data`.
+### 6. Transformer for Time Series
 
-**assimilate(other\_path)**:
+* **`TimeSeriesTransformer.forward(src, tgt)`** → `Tensor`
+  Project inputs to `d_model`, run `nn.Transformer`, project to `output_dim`.
 
-1. Load another `Cerebrum` from disk.
-2. For each submodel, deep copy architecture, export its state to a temp file, import into the copy, and register under a new ID.
-3. Clean up temp files. Return updated list of IDs.
+### 7. MultiMixtureTransformer: Hybrid Sequence Model
 
-**save(path)** / **load(path)**: serialize entire `Cerebrum`.
+Key components:
 
-### MultiMixtureTransformer: Hybrid Sequence Model
+* VAE (`Encoder`, `Decoder`)
+* RNN‑HMM (`RecurrentNetwork`, `HiddenMarkov`)
+* `TinyDiffusionBlock`, `DraftScorer`
+* `TimeSeriesTransformer`
+* Learned weight vectors: `pred_`, `recog_`, `gen_`, `reg_weights`
+* Optional token modules: `auto_decoder`, `to_vocab`
 
-**Subcomponents**:
+**Key methods:**
 
-* VAE encoder/decoder (`Encoder`, `Decoder`) for per‐step latent coding.
-* RNN‐HMM (`RecurrentNetwork` + `HiddenMarkov`) for state‐space modeling.
-* Transformer (`TimeSeriesTransformer`) for sequence‐to‐sequence latent mapping.
-* Per‐dimension weights (`pred_`, `recog_`, `gen_`, `reg_weights`) controlling various tasks.
-* Optional autoregressive decoder (`auto_decoder` + `to_vocab`) for token‐level tasks.
+* `reparameterize(mu, logvar)`
+* `forward(x, tgt=None)` returns reconstruction, latents, emissions, transitions, likelihoods, transformer output
+* `loss(x, outputs)`: reconstruction + KL divergence + HMM NLL
+* `predict(x)`, `recognize(x, tgt_z)`, `generate(num_steps)`, `regression()` + losses
 
-**Key Methods**:
+### 8. Cerebrum Controller & MoE Dynamics
 
-* `reparameterize(mu, logvar)`: sample via reparametrization trick.
-* **Forward**:
+* **Constructor**: initializes experts, `self.gate`, `self.task_encoder`, `self.hypernet`, thresholds, `temperature`.
+* **`add_model()` / `add_expert()`**: register legacy or adapter experts.
+* **`forward(x)`**:
 
-  1. If 3‐D input (T,B,D): encode each time step → list of `z_t`, stack into `(T,B,Z)`.
-  2. Single‐step input: encode once → `(B,Z)`.
-  3. Decode zs → reconstructions, shape matches input.
-  4. RNN → emissions, transitions; HMM → log‐likelihood trajectory.
-  5. Optional transformer pass if `tgt` provided.
-  6. Return dict with all intermediate tensors.
-* `loss(x, outputs)`: sum of reconstruction loss (`MSE`), KL divergence, and HMM NLL.
-* `training_step(x, optimizer)`: wrapper for one iteration of forward, loss, backprop, weight update (+ auxiliary rule loss).
-* **Predict/recognize/generate**:
+  1. Compute summary, obtain expert probabilities.
+  2. Measure confidence/entropy; spawn new adapters via `_spawn_expert()` if needed.
+  3. Mix expert outputs with `load_loss` penalty.
+* **`fit_and_add()`**: fits GMM/HMM via `MMMan` or trains MMM with KL annealing and gradient clipping.
+* **Persistence**: `export_model()`, `import_model()`, `save()`, `load()`, `assimilate()`.
 
-  * `predict(x)`: one‐step lookahead by reweighting latent dims.
-  * `recognize(x, tgt_z)`: cross‐attend latent to target embedding, then decode.
-  * `generate(num_steps)`: sample initial state from HMM, roll through transitions + mixture sampling, decode each step.
-* **Regression tasks**:
+## Data Flow & Computational Graph
 
-  * `regression(context_sequence)`: builds a “latent plan,” blockwise diffusion refinement, CoRe² drafting of multiple token sequences, scoring via `DraftScorer`, best‐draft refinement, entropy regularization.
-  * `regression_loss(...)`: teacher‐forced decoding on ground truth with plan infusion and entropy penalty.
+![Architecture Diagram](images/architecture.png)
 
-### Supporting Components
+---
 
-#### Encoder and Decoder
+## Training Procedures
 
-Detailed feedforward layers mapping input ↔ latent space, with ReLU activations and sigmoid output constraints.
+1. **GMM/HMM MLE** using Adam to minimize negative log-likelihood.
+2. **Hybrid MMM**: forward pass → compute reconstruction loss, KL divergence, HMM NLL; apply annealing schedules; clip gradients.
+3. **Auxiliary Rules**: `add_rule()` + `back_loss()` enforcing constraints on learned weight vectors.
 
-#### TinyDiffusionBlock
+---
 
-Blockwise MLP‐based denoiser implementing a simple residual step:
-$x \leftarrow x + \alpha \cdot f(x)$, $\alpha=0.1$.
+## Inference & Generation
 
-#### DraftScorer
+* **Scoring**: `.score()` returns average log-likelihood.
+* **Sampling**: `generate()` for continuous sequences; `regression()` for CoRe² drafting of token sequences.
 
-Embeds discrete drafts, cross‐attends to a continuous plan under mixed precision, autoregressively decodes to logits, and computes negative log‐likelihood of the original draft.
-
-#### RecurrentNetwork and HiddenMarkov
-
-RNN outputs parameterize state‐emission log‐probs and transition log‐probs; HMM implements the forward algorithm in log‐space for exact sequence likelihoods.
-
-#### GaussianMixture
-
-Vectorized computation of log‐likelihood via Mahalanobis distances, normalization constants, and log‐sum‐exp across components.
-
-#### TimeSeriesTransformer
-
-Standard PyTorch Transformer with learned input/output projections, enabling flexible encoder–decoder over time‐series.
-
-# Data Flow and Computational Graph
-
-![Diagram](images/architecture.png)
-
-# Training Procedures
-
-## GMM/HMM Maximum Likelihood
-
-Derive gradients w\.r.t. mixture logits, means, log‐variances, and transition matrices using PyTorch automatic differentiation.
-
-## Hybrid Model Training
-
-Detailed schedule:
-
-1. Forward pass through all submodules.
-2. Compute reconstruction MSE, clamp `logvar` within \[−10,10] to avoid instability.
-3. Compute KLD = $-0.5 ∑(1 + \logσ² − μ² − σ²)$.
-4. Clamp HMM log‐likelihood to avoid infinities (e.g. \[−1e6,1e6]).
-5. Optionally apply KL annealing: $w_{KL}=\min(1,e/E_{anneal})$.
-6. Backpropagate total loss, clip gradients at `clip_norm`, optimizer step.
-
-## Auxiliary Rule Losses
-
-Users can `add_rule(name,label,target,reward)` to enforce scalar‐mean constraints on per‐dim weight vectors via squared‐error penalties.
-
-# Inference and Generation
-
-## Scoring and Sampling
-
-`score(X)` returns mean log‐likelihood; for HMMs, sums over sequences.
-
-## Regression and Autoregressive Generation
-
-Detailed pseudo‐code for `regression()` including block splitting, denoiser instantiation per block, top‑p sampling, cross‑attention loops, and final refinement.
+---
 
 # Use Examples
 
@@ -386,7 +334,7 @@ custom_config = CerebrumConfig(
 model_id = cerebrum.fit_and_add(data=your_data, config=custom_config, epochs=200)
 ```
 
-### Model Management (Works for Both)
+### Model Management
 
 ```python
 print("Models:", list(cerebrum.models.keys()))
@@ -397,16 +345,40 @@ brain.save("cerebrum_brain.pt")
 loaded = Cerebrum.load("cerebrum_brain.pt")
 ```
 
+```python
+from cerebrum import Cerebrum
+
+brain = Cerebrum()
+# 1. Fit GMM
+gmm_id = brain.fit_and_add(data=X, model_type='gmm', n_components=4)
+score = brain.score(gmm_id, X_test)
+
+# 2. Hybrid MMM
+cfg = CerebrumConfigs.eeg_cerebrum()
+mmm_id = brain.fit_and_add(data=ts_data, config=cfg, model_type='mmm', epochs=100)
+recon, mu, logvar = brain.models[mmm_id].forward(ts_data)['reconstruction']
+
+# 3. Dynamic MoE
+output = brain.models['controller'].forward(new_input)
+```
+
 ---
 
-## Key Features
+## Component Summary
 
-* KL Annealing
-* Label Smoothing
-* Robust Error Handling
-* Unified Configuration System
-* Backward Compatibility
-* Comprehensive Model Management
+| Component      | Role                                                 |
+| -------------- | ---------------------------------------------------- |
+| `GaussianMixture` | Mixture density model                                |
+| `HiddenMarkov` | HMM with GMM emissions                               |
+| `MM`           | Single-model wrapper for GMM/HMM                     |
+| `MMMan`        | Manager of multiple mixture models                   |
+| `TimeSeriesTransformer` | Seq2Seq Transformer for time series                  |
+| `TinyDiffusionBlock` | Residual MLP denoiser                                |
+| `DraftScorer`  | Token draft scoring via cross-attention              |
+| `MultiMixtureTransformer` | Hybrid pipeline: VAE + HMM + diffusion + Transformer |
+| `Cerebrum`     | Dynamic MoE routing and expert management            |
+
+---
 
 ## Installation
 
@@ -414,24 +386,17 @@ loaded = Cerebrum.load("cerebrum_brain.pt")
 pip install -r requirements.txt
 ```
 
-
-# Component Summary Table
-
-| Component               | Role                                            | Key Methods / Complexity                       |
-| ----------------------- | ----------------------------------------------- | ---------------------------------------------- |
-| GaussianMixture         | Unconditional mixture                           | `log_prob`: O(NKD), vectorized                 |
-| HiddenMarkov            | HMM with GMM emissions                          | `log_prob`: O(TS^2 + TSMD)                     |
-| MM                      | Single‐model wrapper                            | `.fit`: gradient MLE, `.score`: mean log\_prob |
-| MMMan                   | Manager of multiple MM instances                | Bulk getters across IDs                        |
-| TimeSeriesTransformer   | Seq2Seq Transformer                             | O(T^2 d + TBd)                                 |
-| TinyDiffusionBlock      | Blockwise denoiser                              | O(BD^2) per block                              |
-| DraftScorer             | Draft scoring via cross‑attention & NLL         | O(T^2 d + BV d)                                |
-| MultiMixtureTransformer | Hybrid end‐to‐end VAE+HMM+diffusion+Transformer | Aggregates all above, configurable components  |
-| Cerebrum                | Top‐level container + assimilation              | `assimilate`: file I/O + model deep copy       |
-
 # Conclusion
 
-Cerebrum provides a scalable, extensible scaffolding for hybrid probabilistic‐neural models.&#x20;
+Cerebrum represents a significant step forward in unifying probabilistic mixture models and deep neural generative architectures under a single, cohesive interface. By combining GMMs, HMMs, VAEs, diffusion blocks, and Transformers within a modular and extensible framework, Cerebrum enables researchers and practitioners to:
+
+Rapidly prototype complex hybrid pipelines without reinventing low-level components.
+
+Leverage Mixture-of-Experts dynamics to balance legacy statistical models with modern neural adapters, ensuring robustness and adaptability across diverse tasks.
+
+Seamlessly scale from single-model experiments to large ensembles managed by MMMan, simplifying experimentation and deployment.
+
+Incorporate domain‐specific rules and auxiliary losses, extending model behavior with minimal changes to core code.Through these developments, Cerebrum aims to remain at the forefront of hybrid model research, empowering the community to explore novel combinations of probabilistic and neural paradigms with unprecedented ease and flexibility.&#x20;
 
 # Licensing
 
@@ -486,8 +451,8 @@ Last updated: June 24, 2025
 We gratefully acknowledge the Cerebrum Development Team for their invaluable contributions to the design, implementation, and testing of the Cerebrum Architecture.
 
 | Name                    | Title                                           | Contact Information                            | 
-|-------------------------| ----------------------------------------------- |------------------------------------------------|
-| Chance Brownfield       | Author\Project Lead                             | ChanceBrownfield3515@gmail.com                 |
-| JOUN H                  | Co-Author\Architecual Specialist                | joun3910@gmail.com                             |
-| Allen P                 | Trainer\Data Specialist                         | https://www.freelancer.com/u/allenjames0828    |
+|-------------------------|-------------------------------------------------|------------------------------------------------|
+| Chance Brownfield       | Author                                          | ChanceBrownfield3515@gmail.com                 |
+|                         | Architecual Specialist                          |                                                |
+| Allen P                 | Data Specialist                                 | https://www.freelancer.com/u/allenjames0828    |
 | ----------------------- | ----------------------------------------------- | ---------------------------------------------- |

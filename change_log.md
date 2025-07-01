@@ -1,56 +1,49 @@
-**Changelog for Cerebrum — 2025-06-27**
+**Changelog for Cerebrum — 2025-06-28**
 
-![Version](https://img.shields.io/badge/version-0.1.0-red)
+![Version](https://img.shields.io/badge/version-0.1.1-red)
+
 
 **Added**
+* **New forward method for Cerebrum class**
+* **Dynamic Expert Assurance**
 
-* **KL Annealing System**
+  * Automatically spawns an initial adapter expert in the `forward` pass when no experts exist.
+  * Ensures seamless integration of new tasks without manual expert initialization.
 
-  * Integrated comprehensive KL annealing to prevent mode collapse in VAE components
-  * Implemented three annealing schedules: linear, cosine, and step
-  * Enhanced the training loop with detailed loss breakdown and progress metrics
+* **Confidence & Entropy Checks**
 
-* **Label Smoothing for Text Generation**
+  * Computes mean confidence (`max` of gating probabilities) and entropy per batch.
+  * Introduces thresholds (`conf_thresh`, `ent_thresh`) to trigger on-the-fly expert spawning.
 
-  * Extended `regression_loss` with a configurable label smoothing parameter (default: 0.1)
-  * Improved output diversity and reduced repetition in Conversational-Cerebrum
+* **Re-routing After Growth**
 
-* **Configuration System**
+  * Recomputes gating logits and probabilities immediately after spawning new experts.
+  * Guarantees updated routing decisions in the same forward pass.
 
-  * Introduced `CerebrumConfig` dataclass for unified model setup
-  * Provided `CerebrumConfigs` presets for four specialized models:
+* **MoE Mixing Pipeline**
 
-    * **EEG-Cerebrum**: 64 channels, 16 states (seizure prediction)
-    * **TTS-Cerebrum**: 80 mel features, 32 states (voice cloning)
-    * **SpeakerRecognition-Cerebrum**: 40 MFCC features, 24 states (speaker identification)
-    * **Conversational-Cerebrum**: 512 token dimensions, 64 states (text generation)
+  * Unified legacy and adapter experts under a single MoE mixing loop.
+  * Temperature-scaled expert outputs with per-key accumulation in one unified output dict.
 
-**Fixed**
+* **Load-balancing Loss**
 
-* **Dependencies and Environment**
+  * Added entropy-based penalty term (`load_loss`) on the average expert usage distribution.
+  * Encourages balanced utilization of all active experts.
 
-  * Corrected `requirements.txt` (removed invalid PyTorch version; aligned all packages for Python 3.13)
-  * Added all necessary libraries for each Cerebrum type
+* **Debug Information**
 
-* **Error Handling and Stability**
+  * Expanded output dictionary with a `debug_info` sub-dict containing:
+  * `confidence`: Scalar confidence value.
+  * `entropy`: Scalar entropy value.
+  * `n_experts`: Current count of active experts.
 
-  * Added input validation across core functions
-  * Implemented step-by-step error tracking to improve failure diagnostics
+* **Logit Masking Logic**
 
-**Changed / Improved**
+  * Implemented masking to ensure logits for inactive expert slots are set to
+    `-inf` only when `current_experts < max_experts`.
 
-* **Initial Analysis and Requirements Review**
+* **Stability in Softmax**
 
-  * Audited the codebase to identify refactoring opportunities
-  * Clarified requirements for specialized Cerebrum variants
+  * Added numerical safeguard (`1e-9`) in entropy computation to prevent `log(0)` errors.
 
-* **Training Pipeline Enhancements**
-
-  * Updated `fit_and_add` to utilize the new config system with automatic parameter validation
-  * Enhanced logging to show fine-grained training progress
-
-* **Code Cleanup and Documentation**
-
-  * Removed test scaffolding and temporary files from the main repository
-  * Added `USAGE_EXAMPLES.md` with detailed usage guides for all model types
-  * Reorganized project structure to include only essential source files and documentation
+---

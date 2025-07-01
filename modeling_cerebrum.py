@@ -1,6 +1,6 @@
 # By: Chance Brownfield
 # Cerebrum
-# "0.1.0"
+# "0.1.1"
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,7 +10,7 @@ import tempfile
 import random
 import string
 import math
-
+from typing import List
 # Try to import numpy, but don't fail if it's not available
 try:
     import numpy as np
@@ -182,6 +182,99 @@ class CerebrumConfigs:
             max_sequence_length=2048  # Long text sequences
         )
 
+# -------------------------
+# Adapter module & config
+# -------------------------
+class Adapter(nn.Module):
+    """Bottleneck adapter: down-project → nonlinearity → up-project."""
+    def __init__(self, d_model: int, adapter_dim: int):
+        super().__init__()
+        self.down_proj = nn.Linear(d_model, adapter_dim)
+        self.up_proj   = nn.Linear(adapter_dim, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, d_model) or (B, d_model)
+        return self.up_proj(F.relu(self.down_proj(x)))
+
+
+class AdapterConfig:
+    """
+    Configuration for inserting adapters into Transformer blocks.
+    """
+    def __init__(
+        self,
+        adapter_type: str = 'bottleneck',   # currently only 'bottleneck' supported
+        adapter_dim: int = 64,              # hidden dim of adapter
+        num_layers: int = 0,                # number of transformer blocks
+        layer_positions: Optional[List[int]] = None  # indices of blocks to augment
+    ):
+        self.adapter_type    = adapter_type
+        self.adapter_dim     = adapter_dim
+        self.num_layers      = num_layers
+        # default: add to every block
+        self.layer_positions = layer_positions or list(range(num_layers))
+
+# ----------------------------------
+# make_adapter_model implementation
+# ----------------------------------
+def make_adapter_model(
+    base_model: nn.Module,
+    base_config: AdapterConfig,
+    flat_params: torch.Tensor
+) -> nn.Module:
+    """
+    Clone base_model and inject adapters into its Transformer blocks,
+    then load the adapter weights from flat_params.
+
+    Args:
+        base_model: a MultiMixtureTransformer instance
+        base_config: tells where/how big adapters are
+        flat_params: 1D tensor of length = total adapter params
+
+    Returns:
+        new_model: a cloned model with adapters loaded
+    """
+    model = copy.deepcopy(base_model)
+
+    # Assume model.transformer.layers is an nn.ModuleList of Transformer blocks
+    # and each block has attribute d_model.
+    # Insert Adapter modules into each selected block:
+    for layer_idx in base_config.layer_positions:
+        block = model.transformer.layers[layer_idx]
+        d_model = block.d_model  # assume attribute
+        adapter = Adapter(d_model, base_config.adapter_dim)
+        block.adapter = adapter
+
+    # Now split flat_params into each adapter's weights
+    pointer = 0
+    for layer_idx in base_config.layer_positions:
+        block = model.transformer.layers[layer_idx]
+        adapter = block.adapter
+        d_model = adapter.up_proj.out_features
+        d_mid   = adapter.down_proj.out_features
+
+        # down_proj: weight (d_mid x d_model), bias (d_mid)
+        n_w1 = d_mid * d_model
+        w1 = flat_params[pointer:pointer+n_w1].view(d_mid, d_model)
+        pointer += n_w1
+        b1 = flat_params[pointer:pointer+d_mid]
+        pointer += d_mid
+
+        # up_proj: weight (d_model x d_mid), bias (d_model)
+        n_w2 = d_model * d_mid
+        w2 = flat_params[pointer:pointer+n_w2].view(d_model, d_mid)
+        pointer += n_w2
+        b2 = flat_params[pointer:pointer+d_model]
+        pointer += d_model
+
+        # copy into adapter
+        adapter.down_proj.weight.data.copy_(w1)
+        adapter.down_proj.bias.data.copy_(b1)
+        adapter.up_proj.weight.data.copy_(w2)
+        adapter.up_proj.bias.data.copy_(b2)
+
+    assert pointer == flat_params.numel(), "Adapter params mismatch"
+    return model
 
 # --- Building Blocks ---
 
@@ -1156,27 +1249,160 @@ class MMMan(nn.Module):
             return out[ids[0]]
         return out
 
-
 class Cerebrum(nn.Module):
     """
-    Manager for multiple models: GMM, HMM, and MMM.
+    Cerebrum: A dynamic mixture‐of‐experts controller that integrates legacy probabilistic
+    models (GMM/HMM/MMM) with learned adapter experts via a shared gating network
+    and hypernetwork-based parameter generation.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        base_model: nn.Module,
+        adapter_config: AdapterConfig,
+        input_dim: int,
+        gate_dim: int = 128,
+        tau_dim: int = 64,
+        conf_thresh: float = 0.6,
+        ent_thresh: float = 1.0,
+        max_experts: int = 10,
+        temperature: float = 1.0,
+    ):
         super().__init__()
+        # — Legacy models (GMM/HMM/MMM) —
         self.models = nn.ModuleDict()
 
-    def _generate_unique_id(self, prefix='model'):
+        # — Unified experts dict (legacy + adapters) —
+        self.experts = nn.ModuleDict()
+        self.current_experts = 0
+        self.max_experts     = max_experts
+
+        # gating network
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, gate_dim),
+            nn.ReLU(),
+            nn.Linear(gate_dim, max_experts)
+        )
+
+        # hypernet components
+        self.temperature = temperature
+        self.base_model     = base_model
+        self.adapter_config = adapter_config
+
+        self.task_encoder = nn.Sequential(
+            nn.Linear(input_dim, tau_dim),
+            nn.ReLU()
+        )
+        d_model = base_model.transformer.layers[0].d_model
+        d_mid   = adapter_config.adapter_dim
+        single_p = d_mid*d_model + d_mid + d_model*d_mid + d_model
+        total_p  = single_p * len(adapter_config.layer_positions)
+        self.hypernet = nn.Sequential(
+            nn.Linear(tau_dim, gate_dim),
+            nn.ReLU(),
+            nn.Linear(gate_dim, total_p)
+        )
+
+        self.conf_thresh = conf_thresh
+        self.ent_thresh  = ent_thresh
+
+    def _generate_unique_id(self, prefix='expert'):
         while True:
-            candidate = f"{prefix}_{''.join(random.choices(string.ascii_lowercase, k=6))}"
-            if candidate not in self.models:
-                return candidate
+            cand = f"{prefix}_{''.join(random.choices(string.ascii_lowercase, k=6))}"
+            if cand not in self.experts:
+                return cand
+
+    def add_model(self, model: nn.Module, model_id: str = None):
+        """
+        Register a legacy GMM/HMM/MMM under both self.models and self.experts,
+        so it participates in the MoE routing immediately.
+        """
+        if model_id is None:
+            model_id = f"model_{len(self.models)}"
+        if model_id in self.models:
+            raise KeyError(f"Model '{model_id}' already exists.")
+        # 1) legacy store
+        self.models[model_id] = model
+        # 2) also slot into experts dict (same instance)
+        self.experts[model_id] = model
+        self.current_experts += 1
+        return model_id
+
+    def add_expert(self, expert: nn.Module, expert_id: Optional[str] = None):
+        """
+        Register a newly spawned adapter expert.
+        """
+        if expert_id is None:
+            expert_id = self._generate_unique_id('adapter')
+        if expert_id in self.experts:
+            raise KeyError(f"Expert '{expert_id}' already exists.")
+        if self.current_experts >= self.max_experts:
+            raise RuntimeError("Maximum number of experts reached.")
+        self.experts[expert_id] = expert
+        self.current_experts += 1
+        return expert_id
+
+    def forward(self, x, **kwargs):
+        # 1) compute summary
+        summary = x.mean(dim=1) if x.dim() > 2 else x
+
+        # 2) ensure ≥1 expert
+        if self.current_experts == 0:
+            self._spawn_expert(summary)
+
+        # 3) gating & mask
+        logits = self.gate(summary)
+        if self.current_experts < self.max_experts:
+            logits[:, self.current_experts:] = float('-inf')
+        probs       = F.softmax(logits, dim=-1)
+        confidences = probs.max(dim=-1).values.mean()
+        entropy     = -(probs * torch.log(probs + 1e-9)).sum(-1).mean()
+
+        # 4) dynamic spawning criterion
+        if confidences < self.conf_thresh or entropy > self.ent_thresh:
+            self._spawn_expert(summary)
+
+        # 5) recompute routing if we grew
+        logits = self.gate(summary)
+        if self.current_experts < self.max_experts:
+            logits[:, self.current_experts:] = float('-inf')
+        probs = F.softmax(logits, dim=-1)
+
+        # 6) MoE mixing
+        outputs = {}
+        active   = list(self.experts.items())
+        for idx, (eid, expert) in enumerate(active):
+            out_i = expert(x, **kwargs)
+            w     = probs[:, idx].view(-1, *([1] * (out_i[next(iter(out_i))].dim() - 1)))
+            for k, v in out_i.items():
+                outputs.setdefault(k, 0.0)
+                outputs[k] += w * (v / self.temperature)
+
+        # 7) load-balancing penalty & debug
+        meany      = probs[:, :len(active)].mean(0)
+        load_loss  = (meany * torch.log(meany + 1e-9)).sum()
+        outputs['load_loss']    = load_loss
+        outputs['expert_probs'] = probs
+        outputs['debug_info']   = {
+            'confidence': confidences.item(),
+            'entropy':     entropy.item(),
+            'n_experts':   self.current_experts
+        }
+        return outputs
+
+    def _spawn_expert(self, summary: torch.Tensor):
+        # 1) generate adapter params
+        tau         = self.task_encoder(summary).mean(0, keepdim=True)
+        flat_params = self.hypernet(tau).squeeze(0)
+        # 2) build adapter expert & register
+        new_expert = make_adapter_model(self.base_model, self.adapter_config, flat_params)
+        self.add_expert(new_expert)
 
     def add_model(self, model: nn.Module, model_id: str = None):
         if model_id is None:
-            model_id = self._generate_unique_id(model.__class__.__name__)
+            model_id = f"model_{len(self.models)}"
         if model_id in self.models:
-            raise KeyError(f"Model with id '{model_id}' already exists.")
+            raise KeyError(model_id)
         self.models[model_id] = model
         return model_id
 
