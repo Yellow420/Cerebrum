@@ -453,6 +453,7 @@ We gratefully acknowledge the Cerebrum Development Team for their invaluable con
 | Name                    | Title                                           | Contact Information                            | 
 |-------------------------|-------------------------------------------------|------------------------------------------------|
 | Chance Brownfield       | Author                                          | ChanceBrownfield3515@gmail.com                 |
-|                         | Architecual Specialist                          |                                                |
+|                         | Architectual Specialist                         |                                                |
 | Allen P                 | Data Specialist                                 | https://www.freelancer.com/u/allenjames0828    |
+| Oliver M                | Training Specialist                             | https://www.freelancer.com/u/oliverm186        |
 | ----------------------- | ----------------------------------------------- | ---------------------------------------------- |
