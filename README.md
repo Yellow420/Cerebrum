@@ -1,6 +1,6 @@
 # Cerebrum: A Multi-Mixture Model
 
-![Version](https://img.shields.io/badge/version-0.1.1-red)
+![Version](https://img.shields.io/badge/version-0.1.2-red)
 
 ## Table of Contents
 
@@ -20,11 +20,12 @@
 5. [Training Procedures](#training-procedures)
 6. [Inference & Generation](#inference--generation)
 8. [Use Examples](#use-examples)
-9. [Component Summary](#component-summary)
-10. [Installation](#installation)
-11. [Conclusion](#conclusion)
-12. [Licensing](#licensing)
-13. [Acknowledgments](#acknowledgments)
+9. [Adding Custom Submodules](#adding-custom-submodules)
+10. [Component Summary](#component-summary)
+11. [Installation](#installation)
+12. [Conclusion](#conclusion)
+13. [Licensing](#licensing)
+14. [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -361,6 +362,58 @@ recon, mu, logvar = brain.models[mmm_id].forward(ts_data)['reconstruction']
 # 3. Dynamic MoE
 output = brain.models['controller'].forward(new_input)
 ```
+
+---
+
+## Adding Custom Submodules
+
+Cerebrum's `model_type_map` is designed to be extended via custom submodules. To add your own models:
+
+1. **Create a submodule** directory, e.g., `my_submodule/` alongside `sub_module/`.
+2. **Define your custom model classes** in a `configuration_<name>.py` (for configs) or `<model>.py`:
+
+   ```python
+   # my_submodule/custom_model.py
+   class MyCustomModel:
+       def __init__(self, **kwargs):
+           # initialize your model
+           ...
+       def fit(self, data):
+           ...
+       def score(self, data):
+           ...
+   ```
+3. **Import and register** your models in `sub_module/sub_mod.py`:
+
+   ```python
+   # sub_module/sub_mod.py
+   # 1. Start with any pre-registered entries
+   model_type_map = {}
+
+   # 2. Import your custom models
+   from my_submodule.custom_model import MyCustomModel
+   model_type_map['my_custom'] = MyCustomModel
+
+   # 3. Optionally merge Hugging Face Transformers types
+   try:
+       from transformers import CONFIG_MAPPING
+       for cfg in CONFIG_MAPPING.values():
+           model_type_map.setdefault(cfg.model_type, cfg)
+   except ImportError:
+       pass
+   ```
+4. **Use** your custom type via `model_type='my_custom'` in `fit_and_add`:
+
+   ```python
+   from cerebrum import Cerebrum
+
+   brain = Cerebrum()
+   model_id = brain.fit_and_add(data=my_data, model_type='my_custom', arg1=..., arg2=...)
+   ```
+
+This pattern ensures your custom models load first and that available Transformer types augment the registry when installed.
+
+---
 
 ---
 

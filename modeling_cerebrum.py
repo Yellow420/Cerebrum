@@ -1,6 +1,6 @@
 # By: Chance Brownfield
 # Cerebrum
-# "0.1.1"
+# "0.1.2"
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,6 +11,7 @@ import random
 import string
 import math
 from typing import List
+from sub_module.sub_mod import *
 # Try to import numpy, but don't fail if it's not available
 try:
     import numpy as np
@@ -1439,8 +1440,11 @@ class Cerebrum(nn.Module):
             kwargs.update(config_dict)
         
         model_type = model_type.lower()
-        
-        if model_type in ('gmm', 'hmm'):
+
+        if model_type in model_type_map:
+            ModelClass = model_type_map[model_type]
+            model = ModelClass(**kwargs)
+        elif model_type in ('gmm', 'hmm'):
             mm = MMMan()
             mm.fit(data, model_type=model_type, **kwargs)
             model = mm

@@ -1,49 +1,42 @@
-**Changelog for Cerebrum — 2025-06-28**
+**Changelog for Cerebrum — 2025-07-06**
 
-![Version](https://img.shields.io/badge/version-0.1.1-red)
+![Version](https://img.shields.io/badge/version-0.1.2-red)
 
 
-**Added**
-* **New forward method for Cerebrum class**
-* **Dynamic Expert Assurance**
+# Changelog
 
-  * Automatically spawns an initial adapter expert in the `forward` pass when no experts exist.
-  * Ensures seamless integration of new tasks without manual expert initialization.
+## Added
 
-* **Confidence & Entropy Checks**
+* **Custom `model_type` dispatch**
+  At the top of `fit_and_add`, we now check:
 
-  * Computes mean confidence (`max` of gating probabilities) and entropy per batch.
-  * Introduces thresholds (`conf_thresh`, `ent_thresh`) to trigger on-the-fly expert spawning.
+  ```python
+  if model_type in model_type_map:
+      ModelClass = model_type_map[model_type]
+      model = ModelClass(**kwargs)
+  ```
 
-* **Re-routing After Growth**
+  This allows arbitrary model classes to be registered and instantiated via a `model_type_map` (e.g. imported from a sub-module) before falling back to the legacy GMM/HMM/MMM logic.
 
-  * Recomputes gating logits and probabilities immediately after spawning new experts.
-  * Guarantees updated routing decisions in the same forward pass.
+* **`export_model` method**
+  A new `export_model(self, model_id: str, filepath: str = None)` API to retrieve (and optionally save) a registered model’s `state_dict`.
 
-* **MoE Mixing Pipeline**
+* **`model_type_map` auto-augmentation with Transformers**
+  In `sub_module/sub_mod.py`, after seeding `model_type_map` with any custom entries, we now attempt to import `transformers.CONFIG_MAPPING` and do:
 
-  * Unified legacy and adapter experts under a single MoE mixing loop.
-  * Temperature-scaled expert outputs with per-key accumulation in one unified output dict.
+  ```python
+  for cfg_cls in CONFIG_MAPPING.values():
+      model_type_map.setdefault(cfg_cls.model_type, cfg_cls)
+  ```
 
-* **Load-balancing Loss**
+  This automatically registers all supported Hugging Face model types (e.g. `"bert"`, `"gpt2"`, `"roberta"`) — without overwriting any custom entries.
 
-  * Added entropy-based penalty term (`load_loss`) on the average expert usage distribution.
-  * Encourages balanced utilization of all active experts.
+* **Listing of registered types**
+  After merging in Transformer entries, we print:
 
-* **Debug Information**
+  ```python
+  for key in sorted(model_type_map):
+      print(f"{key!r} → {model_type_map[key].__name__}")
+  ```
 
-  * Expanded output dictionary with a `debug_info` sub-dict containing:
-  * `confidence`: Scalar confidence value.
-  * `entropy`: Scalar entropy value.
-  * `n_experts`: Current count of active experts.
-
-* **Logit Masking Logic**
-
-  * Implemented masking to ensure logits for inactive expert slots are set to
-    `-inf` only when `current_experts < max_experts`.
-
-* **Stability in Softmax**
-
-  * Added numerical safeguard (`1e-9`) in entropy computation to prevent `log(0)` errors.
-
----
+  This gives a quick console overview of which model types are available at runtime.
