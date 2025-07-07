@@ -1,6 +1,6 @@
 # Cerebrum: A Multi-Mixture Model
 
-![Version](https://img.shields.io/badge/version-0.1.2-red)
+![Version](https://img.shields.io/badge/version-0.1.3-red)
 
 ## Table of Contents
 

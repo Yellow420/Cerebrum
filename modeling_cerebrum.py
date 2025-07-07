@@ -1,6 +1,6 @@
 # By: Chance Brownfield
 # Cerebrum
-# "0.1.2"
+# "0.1.3"
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -382,58 +382,125 @@ class RecurrentNetwork(nn.Module):
 
 
 class GaussianMixture(nn.Module):
-    def __init__(self, n_components, n_features):
+    """
+    Gaussian Mixture Model (GMM) implemented in PyTorch.
+    - Supports generative modeling and log-likelihood computation.
+    - Numerically stable and GPU-safe.
+    """
+    def __init__(self, n_components, n_features, eps=1e-6):
         super().__init__()
         self.n_components = n_components
         self.n_features = n_features
+        self.eps = eps  # Small value for numerical stability
+        # Mixture weights (logits)
         self.logits = nn.Parameter(torch.zeros(n_components))
+        # Component means
         self.means = nn.Parameter(torch.randn(n_components, n_features))
+        # Log-variances (diagonal covariance)
         self.log_vars = nn.Parameter(torch.zeros(n_components, n_features))
 
     def get_weights(self):
+        """Return mixture weights as probabilities."""
         return F.softmax(self.logits, dim=0)
 
     def get_means(self):
+        """Return component means."""
         return self.means
 
     def get_variances(self):
-        return torch.exp(self.log_vars)
+        """Return component variances (exp(log_vars))."""
+        return torch.exp(self.log_vars).clamp(min=self.eps)
+
+    def forward(self, X):
+        """
+        Compute the log-likelihood of X under the mixture model.
+        Args:
+            X: (N, D) tensor (N samples, D features)
+        Returns:
+            log_prob: (N,) tensor of log-likelihoods
+        """
+        return self.log_prob(X)
 
     def log_prob(self, X):
+        """
+        Numerically stable log-likelihood computation for a batch of samples.
+        Args:
+            X: (N, D) tensor or array
+        Returns:
+            log_prob: (N,) tensor (on same device as model)
+        """
+        # Ensure tensor and device
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X, dtype=self.means.dtype, device=self.means.device)
         else:
             X = X.to(self.means.device).type(self.means.dtype)
         N, D = X.shape
-        diff = X.unsqueeze(1) - self.means.unsqueeze(0)
-        inv_vars = torch.exp(-self.log_vars)
-        exp_term = -0.5 * torch.sum(diff * diff * inv_vars.unsqueeze(0), dim=2)
-        log_norm = -0.5 * (torch.sum(self.log_vars, dim=1) + D * math.log(2 * math.pi))
-        comp_log_prob = exp_term + log_norm.unsqueeze(0)
-        log_weights = F.log_softmax(self.logits, dim=0)
-        weighted = comp_log_prob + log_weights.unsqueeze(0)
-        return torch.logsumexp(weighted, dim=1)
+        # Clamp variances for stability
+        vars = self.get_variances()  # (K, D)
+        vars = vars.clamp(min=self.eps, max=1e6)
+        log_vars = torch.log(vars + self.eps)
+        # Compute per-component log-probabilities
+        diff = X.unsqueeze(1) - self.means.unsqueeze(0)  # (N, K, D)
+        inv_vars = 1.0 / (vars + self.eps)  # (K, D)
+        exp_term = -0.5 * torch.sum(diff * diff * inv_vars.unsqueeze(0), dim=2)  # (N, K)
+        log_norm = -0.5 * (torch.sum(log_vars, dim=1) + D * math.log(2 * math.pi))  # (K,)
+        comp_log_prob = exp_term + log_norm.unsqueeze(0)  # (N, K)
+        # Mixture weights (log-space)
+        log_weights = F.log_softmax(self.logits, dim=0)  # (K,)
+        weighted = comp_log_prob + log_weights.unsqueeze(0)  # (N, K)
+        # Log-sum-exp over components for each sample
+        log_prob = torch.logsumexp(weighted, dim=1)  # (N,)
+        # Clamp for numerical safety
+        log_prob = torch.nan_to_num(log_prob, nan=-1e8, posinf=1e8, neginf=-1e8)
+        return log_prob
+
+    def sample(self, num_samples):
+        """
+        Generate samples from the mixture model.
+        Args:
+            num_samples: int
+        Returns:
+            samples: (num_samples, n_features) tensor
+        """
+        device = self.means.device
+        # Sample component indices
+        weights = self.get_weights()
+        comp_ids = torch.multinomial(weights, num_samples, replacement=True)
+        # Gather means and variances for chosen components
+        means = self.means[comp_ids]
+        vars = self.get_variances()[comp_ids]
+        # Sample from N(mean, var)
+        eps = torch.randn(num_samples, self.n_features, device=device)
+        samples = means + eps * torch.sqrt(vars)
+        return samples
 
     def get_log_likelihoods(self, X):
-        if not isinstance(X, torch.Tensor):
-            X = torch.tensor(X, dtype=self.means.dtype, device=self.means.device)
-        else:
-            X = X.to(self.means.device).type(self.means.dtype)
+        """
+        Return log-likelihoods as a numpy array (CPU, for compatibility).
+        """
         with torch.no_grad():
-            ll = self.log_prob(X)
-        return ll.cpu().numpy()
+            logp = self.log_prob(X)
+        return logp.cpu().numpy()
 
     def score(self, X):
+        """
+        Return the mean log-likelihood (scalar float).
+        """
         ll = self.get_log_likelihoods(X)
         return float(ll.mean())
 
 
 class HiddenMarkov(nn.Module):
-    def __init__(self, n_states, n_mix, n_features):
+    """
+    Hidden Markov Model (HMM) with Gaussian Mixture emissions.
+    - Numerically stable, GPU-safe, and ready for generative modeling.
+    """
+    def __init__(self, n_states, n_mix, n_features, eps=1e-6):
         super().__init__()
         self.n_states = n_states
         self.n_mix = n_mix
         self.n_features = n_features
+        self.eps = eps  # Small value for numerical stability
         self.pi_logits = nn.Parameter(torch.zeros(n_states))
         self.trans_logits = nn.Parameter(torch.zeros(n_states, n_states))
         self.weight_logits = nn.Parameter(torch.zeros(n_states, n_mix))
@@ -441,57 +508,95 @@ class HiddenMarkov(nn.Module):
         self.log_vars = nn.Parameter(torch.zeros(n_states, n_mix, n_features))
 
     def get_initial_prob(self):
+        """Return initial state probabilities."""
         return F.softmax(self.pi_logits, dim=0)
 
     def get_transition_matrix(self):
+        """Return transition matrix (row-normalized)."""
         return F.softmax(self.trans_logits, dim=1)
 
     def get_weights(self):
+        """Return mixture weights for each state."""
         return F.softmax(self.weight_logits, dim=1)
 
     def get_means(self):
+        """Return means for each state and mixture."""
         return self.means
 
     def get_variances(self):
-        return torch.exp(self.log_vars)
+        """Return variances for each state and mixture (exp(log_vars))."""
+        # Clamp for numerical stability
+        return torch.exp(self.log_vars).clamp(min=self.eps, max=1e6)
+
+    def forward(self, X):
+        """
+        Compute the log-likelihood of X under the HMM-GMM model.
+        Args:
+            X: (T, D) or (batch, T, D) tensor
+        Returns:
+            log_prob: scalar or (batch,) tensor
+        """
+        return self.log_prob(X)
 
     def log_prob(self, X):
+        """
+        Numerically stable log-likelihood computation for a sequence or batch of sequences.
+        Args:
+            X: (T, D) or (batch, T, D) tensor or array
+        Returns:
+            log_prob: scalar or (batch,) tensor (on same device as model)
+        """
+        # Ensure tensor and device
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X, dtype=self.means.dtype, device=self.means.device)
         else:
             X = X.to(self.means.device).type(self.means.dtype)
+        if X.dim() == 3:
+            # Batch of sequences
+            return torch.stack([self.log_prob(seq) for seq in X], dim=0)
         T, D = X.shape
-        diff = X.unsqueeze(1).unsqueeze(2) - self.means.unsqueeze(0)
-        inv_vars = torch.exp(-self.log_vars)
-        exp_term = -0.5 * torch.sum(diff * diff * inv_vars.unsqueeze(0), dim=3)
-        log_norm = -0.5 * (torch.sum(self.log_vars, dim=2) + D * math.log(2 * math.pi))
-        comp_log_prob = exp_term + log_norm.unsqueeze(0)
-        log_mix_weights = F.log_softmax(self.weight_logits, dim=1)
-        weighted = comp_log_prob + log_mix_weights.unsqueeze(0)
-        emission_log_prob = torch.logsumexp(weighted, dim=2)
-        log_pi = F.log_softmax(self.pi_logits, dim=0)
-        log_A = F.log_softmax(self.trans_logits, dim=1)
-        log_alpha = torch.zeros(T, self.n_states, dtype=X.dtype, device=X.device)
+        # Clamp variances for stability
+        vars = self.get_variances()  # (S, M, D)
+        log_vars = torch.log(vars + self.eps)
+        # Compute emission log-probabilities for each state and mixture
+        # X: (T, D), means: (S, M, D) => diff: (T, S, M, D)
+        diff = X.unsqueeze(1).unsqueeze(2) - self.means.unsqueeze(0)  # (T, S, M, D)
+        inv_vars = 1.0 / (vars + self.eps)  # (S, M, D)
+        exp_term = -0.5 * torch.sum(diff * diff * inv_vars.unsqueeze(0), dim=3)  # (T, S, M)
+        log_norm = -0.5 * (torch.sum(log_vars, dim=2) + D * math.log(2 * math.pi))  # (S, M)
+        comp_log_prob = exp_term + log_norm.unsqueeze(0)  # (T, S, M)
+        # Mixture weights (log-space)
+        log_mix_weights = F.log_softmax(self.weight_logits, dim=1)  # (S, M)
+        weighted = comp_log_prob + log_mix_weights.unsqueeze(0)  # (T, S, M)
+        # Log-sum-exp over mixtures for each state
+        emission_log_prob = torch.logsumexp(weighted, dim=2)  # (T, S)
+        # HMM forward algorithm in log-space
+        log_pi = F.log_softmax(self.pi_logits, dim=0)  # (S,)
+        log_A = F.log_softmax(self.trans_logits, dim=1)  # (S, S)
+        log_alpha = torch.full((T, self.n_states), float('-inf'), dtype=X.dtype, device=X.device)
+        # Initialization: log_alpha[0, s] = log_pi[s] + emission_log_prob[0, s]
         log_alpha[0] = log_pi + emission_log_prob[0]
         for t in range(1, T):
-            prev = log_alpha[t - 1].unsqueeze(1)
-            log_alpha[t] = emission_log_prob[t] + torch.logsumexp(prev + log_A, dim=1)
-        return torch.logsumexp(log_alpha[-1], dim=0)
+            # For each state s, sum over previous states s'
+            prev = log_alpha[t - 1].unsqueeze(1)  # (S, 1)
+            # logsumexp over previous states
+            log_alpha[t] = emission_log_prob[t] + torch.logsumexp(prev + log_A, dim=0)
+        # Log-sum-exp over final states for total sequence log-likelihood
+        log_prob = torch.logsumexp(log_alpha[-1], dim=0)
+        # Clamp for numerical safety
+        log_prob = torch.nan_to_num(log_prob, nan=-1e8, posinf=1e8, neginf=-1e8)
+        return log_prob
 
     def get_log_likelihoods(self, X):
-        if not isinstance(X, torch.Tensor):
-            X = torch.tensor(X, dtype=self.means.dtype, device=self.means.device)
-        else:
-            X = X.to(self.means.device).type(self.means.dtype)
+        """
+        Return log-likelihoods as a tensor (no .cpu().numpy()).
+        Args:
+            X: (T, D) or (batch, T, D)
+        Returns:
+            log_probs: scalar or (batch,) tensor
+        """
         with torch.no_grad():
-            if X.dim() == 3:
-                return [self.log_prob(seq).item() for seq in X]
-            else:
-                return [self.log_prob(X).item()]
-
-    def score(self, X):
-        lls = self.get_log_likelihoods(X)
-        return float(sum(lls) / len(lls))
+            return self.log_prob(X)
 
 
 class TimeSeriesTransformer(nn.Module):
@@ -953,75 +1058,91 @@ class MultiMixtureTransformer(nn.Module):
 
 
 class MM(nn.Module):
-    """Multi-Mixture."""
-
-    def __init__(self, n_components, n_features, model_type='gmm', n_mix=1):
+    """
+    Multi-Mixture wrapper for GMM or HMM models.
+    Supports fitting, scoring, and exporting models.
+    """
+    def __init__(self, n_components, n_features, model_type='gmm', n_mix=1, eps=1e-6):
         super().__init__()
         self.model_type = model_type.lower()
         self.n_features = n_features
-        self.gmms = []
-        self.hgmm_models = {}
+        self.eps = eps
+        self.gmm_models = []  # List of GMMs
+        self.hmm_models = {}  # Dict of HMMs
         self.active_hmm = None
         if self.model_type == 'gmm':
-            self.gmm = GaussianMixture(n_components, n_features)
-        elif self.model_type == 'hgmm':
-            self.hm = HiddenMarkov(n_components, n_mix, n_features)
+            self.gmm = GaussianMixture(n_components, n_features, eps=eps)
+        elif self.model_type == 'hmm':
+            self.hmm = HiddenMarkov(n_components, n_mix, n_features, eps=eps)
         else:
-            raise ValueError("model_type must be 'gmm' or 'hgmm'")
+            raise ValueError("model_type must be 'gmm' or 'hmm'")
+
+    def forward(self, X):
+        """
+        Forward pass: returns log-likelihoods for input X.
+        """
+        if self.model_type == 'gmm':
+            return self.gmm(X)
+        else:
+            return self.hmm(X)
 
     def _prepare_tensor(self, X):
-        return torch.tensor(X, dtype=torch.float32) if not isinstance(X, torch.Tensor) else X.float()
+        if not isinstance(X, torch.Tensor):
+            return torch.tensor(X, dtype=torch.float32, device=next(self.parameters()).device)
+        return X.float().to(next(self.parameters()).device)
 
     def fit(self, X, init_params=None, lr=1e-2, epochs=100, verbose=False, data_id=None):
+        """
+        Fit the GMM or HMM to data X.
+        """
         if init_params is not None:
             self.import_model(init_params)
-
-        X_tensor = self._prepare_tensor(X).to(next(self.parameters()).device)
+        X_tensor = self._prepare_tensor(X)
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
-
         for epoch in range(epochs):
             optimizer.zero_grad()
             if self.model_type == 'gmm':
                 loss = -torch.mean(self.gmm.log_prob(X_tensor))
             else:
                 if X_tensor.dim() == 3:
-                    loss = -sum(self.hm.log_prob(seq) for seq in X_tensor) / X_tensor.size(0)
+                    loss = -sum(self.hmm.log_prob(seq) for seq in X_tensor) / X_tensor.size(0)
                 else:
-                    loss = -self.hm.log_prob(X_tensor)
+                    loss = -self.hmm.log_prob(X_tensor)
             loss.backward()
             optimizer.step()
             if verbose and epoch % 10 == 0:
                 print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
-
         if self.model_type == 'gmm':
             if data_id is None:
-                data_id = len(self.gmms)
-            while isinstance(data_id, int) and data_id < len(self.gmms) and self.gmms[data_id] is not None:
+                data_id = len(self.gmm_models)
+            while isinstance(data_id, int) and data_id < len(self.gmm_models) and self.gmm_models[data_id] is not None:
                 data_id += 1
-            if data_id == len(self.gmms):
-                self.gmms.append(self.gmm)
+            if data_id == len(self.gmm_models):
+                self.gmm_models.append(self.gmm)
             else:
-                self.gmms[data_id] = self.gmm
+                self.gmm_models[data_id] = self.gmm
         else:
             if data_id is None:
                 while True:
                     data_id = ''.join(random.choices(string.ascii_lowercase, k=6))
-                    if data_id not in self.hgmm_models:
+                    if data_id not in self.hmm_models:
                         break
-            self.hgmm_models[data_id] = self.hm
+            self.hmm_models[data_id] = self.hmm
             self.active_hmm = data_id
-
         return data_id
 
     def unfit(self, data_id):
+        """
+        Remove a fitted model by its ID.
+        """
         if isinstance(data_id, int):
-            if 0 <= data_id < len(self.gmms):
-                del self.gmms[data_id]
+            if 0 <= data_id < len(self.gmm_models):
+                del self.gmm_models[data_id]
             else:
                 raise ValueError(f"GMM with id {data_id} does not exist.")
         elif isinstance(data_id, str):
-            if data_id in self.hgmm_models:
-                del self.hgmm_models[data_id]
+            if data_id in self.hmm_models:
+                del self.hmm_models[data_id]
                 if self.active_hmm == data_id:
                     self.active_hmm = None
             else:
@@ -1030,48 +1151,82 @@ class MM(nn.Module):
             raise TypeError("data_id must be an int (GMM) or str (HMM)")
 
     def check_data(self):
-        data = {i: 'gmm' for i in range(len(self.gmms))}
-        data.update({name: 'hmm' for name in self.hgmm_models.keys()})
+        """
+        Return a dict of all stored model IDs and their types.
+        """
+        data = {i: 'gmm' for i in range(len(self.gmm_models))}
+        data.update({name: 'hmm' for name in self.hmm_models.keys()})
         return data
 
     def score(self, X):
-        with torch.no_grad():
-            X_tensor = self._prepare_tensor(X).to(next(self.parameters()).device)
-            if self.model_type == 'gmm':
-                return float(self.gmm.log_prob(X_tensor).mean().cpu().item())
+        """
+        Return the mean log-likelihood of X under the current model.
+        """
+        X_tensor = self._prepare_tensor(X)
+        if self.model_type == 'gmm':
+            return self.gmm.log_prob(X_tensor).mean()
+        else:
+            if X_tensor.dim() == 3:
+                return torch.stack([self.hmm.log_prob(seq) for seq in X_tensor]).mean()
             else:
-                if X_tensor.dim() == 3:
-                    return float(sum(self.hm.log_prob(seq).item() for seq in X_tensor) / X_tensor.size(0))
-                else:
-                    return float(self.hm.log_prob(X_tensor).cpu().item())
+                return self.hmm.log_prob(X_tensor)
 
     def get_log_likelihoods(self, X):
-        with torch.no_grad():
-            X_tensor = self._prepare_tensor(X).to(next(self.parameters()).device)
-            if self.model_type == 'gmm':
-                return self.gmm.log_prob(X_tensor).cpu().numpy()
+        """
+        Return per-sample log-likelihoods as a tensor.
+        """
+        X_tensor = self._prepare_tensor(X)
+        if self.model_type == 'gmm':
+            return self.gmm.log_prob(X_tensor)
+        else:
+            if X_tensor.dim() == 3:
+                return torch.stack([self.hmm.log_prob(seq) for seq in X_tensor])
             else:
-                if X_tensor.dim() == 3:
-                    return [self.hm.log_prob(seq).item() for seq in X_tensor]
-                else:
-                    return [self.hm.log_prob(X_tensor).item()]
+                return self.hmm.log_prob(X_tensor)
 
-    def get_means(self):
-        return (self.gmm if self.model_type == 'gmm' else self.hgmm).get_means().cpu().detach().numpy()
+    def get_means(self, as_numpy=False):
+        """
+        Return means of the current model. If as_numpy=True, returns numpy array.
+        """
+        if self.model_type == 'gmm':
+            means = self.gmm.get_means().detach()
+        else:
+            means = self.hmm.get_means().detach()
+        return means.cpu().numpy() if as_numpy else means
 
-    def get_variances(self):
-        return (self.gmm if self.model_type == 'gmm' else self.hgmm).get_variances().cpu().detach().numpy()
+    def get_variances(self, as_numpy=False):
+        """
+        Return variances of the current model. If as_numpy=True, returns numpy array.
+        """
+        if self.model_type == 'gmm':
+            vars = self.gmm.get_variances().detach()
+        else:
+            vars = self.hmm.get_variances().detach()
+        return vars.cpu().numpy() if as_numpy else vars
 
-    def get_weights(self):
-        return (self.gmm if self.model_type == 'gmm' else self.hgmm).get_weights().cpu().detach().numpy()
+    def get_weights(self, as_numpy=False):
+        """
+        Return mixture weights of the current model. If as_numpy=True, returns numpy array.
+        """
+        if self.model_type == 'gmm':
+            weights = self.gmm.get_weights().detach()
+        else:
+            weights = self.hmm.get_weights().detach()
+        return weights.cpu().numpy() if as_numpy else weights
 
     def export_model(self, filepath=None):
+        """
+        Export the model's state_dict. Optionally save to file.
+        """
         state = self.state_dict()
         if filepath:
             torch.save(state, filepath)
         return state
 
     def import_model(self, source):
+        """
+        Load model state from a file or dict.
+        """
         if isinstance(source, str):
             state = torch.load(source)
         elif isinstance(source, dict):
@@ -1082,60 +1237,78 @@ class MM(nn.Module):
 
 
 class MMMan(nn.Module):
-    """Multi-Mixture Manager."""
-
+    """
+    Multi-Mixture Manager: manages multiple GMM and HMM models.
+    Allows fitting, exporting, and scoring of multiple models.
+    """
     def __init__(self):
         super().__init__()
-        self.gmms = []  # List of GaussianMixture models
-        self.hgmm_models = {}  # Dict of HM models keyed by string IDs
-        self.active_hmm = None  # Optional: active HGMM for scoring/fitting
+        self.gmm_models = []  # List of GMMs
+        self.hmm_models = {}  # Dict of HMMs keyed by string IDs
+        self.active_hmm = None
+
+    def forward(self, X, data_id=None):
+        """
+        Forward pass: returns log-likelihoods for input X using the specified model.
+        If data_id is None, uses the first available model.
+        """
+        if data_id is None:
+            if self.gmm_models:
+                return self.gmm_models[0](X)
+            elif self.hmm_models:
+                return next(iter(self.hmm_models.values()))(X)
+            else:
+                raise ValueError("No models available.")
+        if isinstance(data_id, int):
+            return self.gmm_models[data_id](X)
+        elif isinstance(data_id, str):
+            return self.hmm_models[data_id](X)
+        else:
+            raise TypeError("data_id must be int (GMM) or str (HMM)")
 
     def _generate_unique_id(self):
         while True:
             candidate = ''.join(random.choices(string.ascii_lowercase, k=6))
-            if candidate not in self.hgmm_models:
+            if candidate not in self.hmm_models:
                 return candidate
 
     def fit(self, data=None, model_type='gmm', n_components=1, n_features=1, n_mix=1,
             data_id=None, init_params=None, lr=1e-2, epochs=100):
         """
-        Fit or absorb a model:
-        - If `data` is a tensor/array, fit a new model.
-        - If `data` is a pre-trained model, absorb it directly.
-        - `data_id` determines storage; if None, generate a unique one.
+        Fit or absorb a model. Stores by data_id.
         """
         if model_type == 'gmm':
             if data_id is None:
-                data_id = len(self.gmms)
-                while data_id < len(self.gmms) and self.gmms[data_id] is not None:
+                data_id = len(self.gmm_models)
+                while data_id < len(self.gmm_models) and self.gmm_models[data_id] is not None:
                     data_id += 1
             if isinstance(data, GaussianMixture):
                 # Absorb pretrained model
-                if data_id < len(self.gmms):
-                    self.gmms[data_id] = data
+                if data_id < len(self.gmm_models):
+                    self.gmm_models[data_id] = data
                 else:
-                    while len(self.gmms) < data_id:
-                        self.gmms.append(None)
-                    self.gmms.append(data)
+                    while len(self.gmm_models) < data_id:
+                        self.gmm_models.append(None)
+                    self.gmm_models.append(data)
             else:
                 # Train new model
                 model = MM(n_components, n_features, model_type='gmm')
                 model.fit(data, init_params=init_params, lr=lr, epochs=epochs)
-                if data_id < len(self.gmms):
-                    self.gmms[data_id] = model.gmm
+                if data_id < len(self.gmm_models):
+                    self.gmm_models[data_id] = model.gmm
                 else:
-                    while len(self.gmms) < data_id:
-                        self.gmms.append(None)
-                    self.gmms.append(model.gmm)
+                    while len(self.gmm_models) < data_id:
+                        self.gmm_models.append(None)
+                    self.gmm_models.append(model.gmm)
         elif model_type == 'hmm':
             if data_id is None:
                 data_id = self._generate_unique_id()
             if isinstance(data, HiddenMarkov):
-                self.hgmm_models[data_id] = data
+                self.hmm_models[data_id] = data
             else:
                 model = MM(n_components, n_features, model_type='hmm', n_mix=n_mix)
                 model.fit(data, init_params=init_params, lr=lr, epochs=epochs)
-                self.hgmm_models[data_id] = model.hm
+                self.hmm_models[data_id] = model.hmm
         else:
             raise ValueError("model_type must be 'gmm' or 'hmm'")
         return data_id
@@ -1146,13 +1319,13 @@ class MMMan(nn.Module):
         Returns a GaussianMixture or HiddenMarkov instance.
         """
         if isinstance(data_id, int):
-            if 0 <= data_id < len(self.gmms):
-                return self.gmms[data_id]
+            if 0 <= data_id < len(self.gmm_models):
+                return self.gmm_models[data_id]
             else:
                 raise ValueError(f"GMM with id {data_id} does not exist.")
         elif isinstance(data_id, str):
-            if data_id in self.hgmm_models:
-                return self.hgmm_models[data_id]
+            if data_id in self.hmm_models:
+                return self.hmm_models[data_id]
             else:
                 raise ValueError(f"HMM model with name '{data_id}' does not exist.")
         else:
@@ -1163,13 +1336,13 @@ class MMMan(nn.Module):
         Remove a model from the internal storage (GMM or HMM).
         """
         if isinstance(data_id, int):
-            if 0 <= data_id < len(self.gmms):
-                del self.gmms[data_id]
+            if 0 <= data_id < len(self.gmm_models):
+                del self.gmm_models[data_id]
             else:
                 raise ValueError(f"GMM with id {data_id} does not exist.")
         elif isinstance(data_id, str):
-            if data_id in self.hgmm_models:
-                del self.hgmm_models[data_id]
+            if data_id in self.hmm_models:
+                del self.hmm_models[data_id]
                 if self.active_hmm == data_id:
                     self.active_hmm = None
             else:
@@ -1180,13 +1353,68 @@ class MMMan(nn.Module):
     def check_data(self):
         """
         Returns a dict mapping each stored data's ID to its type.
-
         - Integer keys → 'gmm'
         - String keys   → 'hmm'
         """
-        data = {i: 'gmm' for i in range(len(self.gmms)) if self.gmms[i] is not None}
-        data.update({name: 'hmm' for name in self.hgmm_models.keys()})
+        data = {i: 'gmm' for i in range(len(self.gmm_models)) if self.gmm_models[i] is not None}
+        data.update({name: 'hmm' for name in self.hmm_models.keys()})
         return data
+
+    def get_means(self, data_ids=None, as_numpy=False):
+        """
+        Return means for specified models. If as_numpy=True, returns numpy arrays.
+        """
+        ids = self._normalize_ids(data_ids)
+        out = {d: self._get_submodel(d).get_means().detach() for d in ids}
+        if as_numpy:
+            out = {k: v.cpu().numpy() for k, v in out.items()}
+        if isinstance(data_ids, (int, str)):
+            return out[ids[0]]
+        return out
+
+    def get_variances(self, data_ids=None, as_numpy=False):
+        """
+        Return variances for specified models. If as_numpy=True, returns numpy arrays.
+        """
+        ids = self._normalize_ids(data_ids)
+        out = {d: self._get_submodel(d).get_variances().detach() for d in ids}
+        if as_numpy:
+            out = {k: v.cpu().numpy() for k, v in out.items()}
+        if isinstance(data_ids, (int, str)):
+            return out[ids[0]]
+        return out
+
+    def get_weights(self, data_ids=None, as_numpy=False):
+        """
+        Return mixture weights for specified models. If as_numpy=True, returns numpy arrays.
+        """
+        ids = self._normalize_ids(data_ids)
+        out = {d: self._get_submodel(d).get_weights().detach() for d in ids}
+        if as_numpy:
+            out = {k: v.cpu().numpy() for k, v in out.items()}
+        if isinstance(data_ids, (int, str)):
+            return out[ids[0]]
+        return out
+
+    def score(self, X, data_ids=None):
+        """
+        Average log-likelihood(s) of X under each specified component.
+        """
+        ids = self._normalize_ids(data_ids)
+        out = {d: self._get_submodel(d).log_prob(X).mean() for d in ids}
+        if isinstance(data_ids, (int, str)):
+            return out[ids[0]]
+        return out
+
+    def get_log_likelihoods(self, X, data_ids=None):
+        """
+        Per-sample log-likelihood(s) of X under each specified component.
+        """
+        ids = self._normalize_ids(data_ids)
+        out = {d: self._get_submodel(d).log_prob(X) for d in ids}
+        if isinstance(data_ids, (int, str)):
+            return out[ids[0]]
+        return out
 
     def _all_ids(self):
         return list(self.check_data().keys())
@@ -1200,55 +1428,9 @@ class MMMan(nn.Module):
 
     def _get_submodel(self, data_id):
         if isinstance(data_id, int):
-            return self.gmms[data_id]
-        return self.hgmm_models[data_id]
+            return self.gmm_models[data_id]
+        return self.hmm_models[data_id]
 
-    def get_means(self, data_ids=None):
-        """
-        If data_ids is None, returns a dict {id: means} for all components;
-        if a single id, returns just that component's means (numpy array);
-        if a list/tuple, returns a dict.
-        """
-        ids = self._normalize_ids(data_ids)
-        out = {d: self._get_submodel(d).get_means() for d in ids}
-        # unwrap singletons
-        if isinstance(data_ids, (int, str)):
-            return out[ids[0]]
-        return out
-
-    def get_variances(self, data_ids=None):
-        ids = self._normalize_ids(data_ids)
-        out = {d: self._get_submodel(d).get_variances() for d in ids}
-        if isinstance(data_ids, (int, str)):
-            return out[ids[0]]
-        return out
-
-    def get_weights(self, data_ids=None):
-        ids = self._normalize_ids(data_ids)
-        out = {d: self._get_submodel(d).get_weights() for d in ids}
-        if isinstance(data_ids, (int, str)):
-            return out[ids[0]]
-        return out
-
-    def score(self, X, data_ids=None):
-        """
-        Average log-likelihood(s) of X under each specified component.
-        """
-        ids = self._normalize_ids(data_ids)
-        out = {d: self._get_submodel(d).score(X) for d in ids}
-        if isinstance(data_ids, (int, str)):
-            return out[ids[0]]
-        return out
-
-    def get_log_likelihoods(self, X, data_ids=None):
-        """
-        Per-sample log-likelihood(s) of X under each specified component.
-        """
-        ids = self._normalize_ids(data_ids)
-        out = {d: self._get_submodel(d).get_log_likelihoods(X) for d in ids}
-        if isinstance(data_ids, (int, str)):
-            return out[ids[0]]
-        return out
 
 class Cerebrum(nn.Module):
     """
