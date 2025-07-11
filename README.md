@@ -509,4 +509,5 @@ We gratefully acknowledge the Cerebrum Development Team for their invaluable con
 | Kito Y                  | Architectual Specialist                         | https://www.freelancer.com/u/kitoy69           |
 | Allen P                 | Data Specialist                                 | https://www.freelancer.com/u/allenjames0828    |
 | Oliver M                | Training Specialist                             | https://www.freelancer.com/u/oliverm186        |
+| Weneka W                | Marketing Specialist                            | https://www.freelancer.com/u/Nuel24            |
 | ----------------------- | ----------------------------------------------- | ---------------------------------------------- |
